@@ -262,6 +262,8 @@ revoke execute on function public.pss_new_code(), public.pss_is_teacher(), publi
   public.pss_team_json(public.pss_teams), public.pss_clean_names(text[]), public.pss_whoami(), public.pss_join_team(text, text[]),
   public.pss_team_update(text, jsonb, text[]), public.pss_add_song(text, text, text, text, jsonb), public.pss_new_team_code(uuid),
   public.pss_team_devices() from public, anon;
+-- internal helpers: not callable from the apps at all
+revoke execute on function public.pss_team_json(public.pss_teams), public.pss_clean_names(text[]) from authenticated;
 grant execute on function public.pss_new_code(), public.pss_is_teacher(), public.pss_my_team(), public.pss_my_class(),
   public.pss_whoami(), public.pss_join_team(text, text[]), public.pss_team_update(text, jsonb, text[]),
   public.pss_add_song(text, text, text, text, jsonb), public.pss_new_team_code(uuid), public.pss_team_devices() to authenticated;
