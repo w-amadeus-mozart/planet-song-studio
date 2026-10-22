@@ -1,0 +1,16 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1024 1024">
+  <defs>
+    <linearGradient id="sky" x1="0" y1="0" x2="0" y2="1"><stop offset="0" stop-color="#2b2f86"/><stop offset="1" stop-color="#0a0d2a"/></linearGradient>
+    <radialGradient id="pl" cx=".35" cy=".3" r=".8"><stop offset="0" stop-color="#ffd27a"/><stop offset=".6" stop-color="#ff8a3d"/><stop offset="1" stop-color="#b8461c"/></radialGradient>
+  </defs>
+  <rect width="1024" height="1024" fill="url(#sky)"/>
+  <g fill="#fff"><circle cx="150" cy="170" r="7"/><circle cx="860" cy="140" r="5"/><circle cx="900" cy="420" r="6"/><circle cx="120" cy="560" r="5"/><circle cx="300" cy="90" r="4"/><circle cx="760" cy="880" r="5"/><circle cx="210" cy="880" r="6"/></g>
+  <ellipse cx="470" cy="560" rx="380" ry="96" fill="none" stroke="#f3dfa9" stroke-width="30" transform="rotate(-18 470 560)" opacity=".55"/>
+  <circle cx="470" cy="560" r="250" fill="url(#pl)"/>
+  <path d="M120 640 A380 96 -18 0 0 830 420" fill="none" stroke="#f3dfa9" stroke-width="30" transform="rotate(0)" opacity=".95"/>
+  <g transform="translate(620 120)">
+    <path d="M150 0 L150 330" stroke="#fff" stroke-width="44" stroke-linecap="round"/>
+    <path d="M150 0 C200 60 300 80 300 170" fill="none" stroke="#fff" stroke-width="40" stroke-linecap="round"/>
+    <ellipse cx="90" cy="340" rx="86" ry="66" fill="#fff" transform="rotate(-20 90 340)"/>
+  </g>
+</svg>
