@@ -18,42 +18,107 @@ const planetOrder = (a, b) => (PMAP[a.planet]?.n || 9) - (PMAP[b.planet]?.n || 9
 const fileBase = s => `${s.cls} - ${s.planet} - ${s.team}`.replace(/[\/\\:*?"<>|]+/g, '_');
 
 /* ---------- state ---------- */
-let cls = pref('cls', CLASSES[0]);
+const cloud = CONFIG.mode === 'supabase' && !!CONFIG.url && !!CONFIG.key;
+let classes = cloud ? [] : CLASSES.map(n => ({ id: n, name: n }));   // [{id, name}]
+let cls = pref('cls', CLASSES[0]);  // the class on screen, by name
 let view = 'live';
 let online = false, sb = null;
-const teams = new Map();            // "cls|planet|team" -> {cls, planet, team, info, updated_at}
-let songs = [];                     // {id, cls, planet, team, title, genre, lyrics, info, url, created_at, local?}
-let events = [];                    // newest first
+let auth = cloud ? 'loading' : 'local';   // loading | signin | notTeacher | ok | local
+let me = null;                      // signed-in teacher's email
+const teams = new Map();            // id -> {id, class_id, planet, name, join_code, joining_open, members, info, updated_at}
+const devices = new Map();          // team id -> iPads joined
+let songs = [];                     // {id, team_id?, cls, planet, team, title, genre, lyrics, info, file, url, created_at, local?}
+let events = [];                    // newest first: {team_id?, cls, planet, team, what, info, created_at}
 let medley = null;                  // {cls, url, blob}
+let sheet = null;                   // open pop-up: {kind: 'team'|'addTeam'|'classes', ...}
 
-/* ---------- cloud ---------- */
+const classById = id => classes.find(c => c.id === id);
+const classByName = n => classes.find(c => c.name === n);
+// Rows from the cloud carry ids; the screens use class name, planet and team name.
+function named(r){
+  if (!r.team_id) return r;
+  const t = teams.get(r.team_id), c = t && classById(t.class_id);
+  return { ...r, cls: c ? c.name : '?', planet: t ? t.planet : '?', team: t ? t.name : 'Removed team' };
+}
+const teamView = t => ({ ...t, cls: classById(t.class_id)?.name || '?', team: t.name });
+
+/* ---------- cloud: teacher sign-in, then everything for this teacher ---------- */
 function loadScript(src){ return new Promise((res, rej) => { const s = document.createElement('script'); s.src = src; s.onload = res; s.onerror = rej; document.head.appendChild(s); }); }
 async function connect(){
-  if (CONFIG.mode !== 'supabase' || !CONFIG.url || !CONFIG.key){ render(); return; }
+  if (!cloud){ render(); return; }
   try {
     await loadScript('../shared/supabase.js');
-    sb = window.supabase.createClient(CONFIG.url, CONFIG.key, { auth: { persistSession: false } });
-    const room = CONFIG.room;
-    const [t, s, e] = await Promise.all([
-      sb.from('pss_teams').select('*').eq('room', room),
-      sb.from('pss_songs').select('*').eq('room', room).order('created_at', { ascending: false }),
-      sb.from('pss_events').select('*').eq('room', room).order('created_at', { ascending: false }).limit(150)
-    ]);
-    if (t.error) throw t.error;
-    t.data.forEach(addTeam); (s.data || []).forEach(r => songs.push(cloudSong(r))); events = e.data || [];
-    online = true;
-    sb.channel('pss-' + room)
-      .on('postgres_changes', { event: 'INSERT', schema: 'public', table: 'pss_events', filter: `room=eq.${room}` }, p => onEvent(p.new))
-      .on('postgres_changes', { event: '*', schema: 'public', table: 'pss_teams', filter: `room=eq.${room}` }, p => { if (p.new && p.new.team){ addTeam(p.new); refresh(); } })
-      .on('postgres_changes', { event: 'INSERT', schema: 'public', table: 'pss_songs', filter: `room=eq.${room}` }, p => { songs.unshift(cloudSong(p.new)); refresh(); })
-      .subscribe(st => { const was = online; online = st === 'SUBSCRIBED' || (st !== 'CLOSED' && st !== 'CHANNEL_ERROR' && online); if (was !== online) paintConn(); });
-  } catch (err){ console.error(err); online = false; }
+    sb = window.supabase.createClient(CONFIG.url, CONFIG.key, { auth: { persistSession: true, autoRefreshToken: true, storageKey: 'pst-auth' } });
+    const { data } = await sb.auth.getSession();
+    if (data.session) await afterSignIn(data.session); else { auth = 'signin'; render(); }
+  } catch (err){ console.error(err); auth = 'signin'; render(); toast("Can't reach the cloud. Check the wifi."); }
+}
+async function signIn(email, password){
+  const err = document.getElementById('signErr'), b = document.querySelector('[data-act=signin]');
+  b.disabled = true; b.textContent = 'Signing in…';
+  const { data, error } = await sb.auth.signInWithPassword({ email: email.trim(), password });
+  if (error){ b.disabled = false; b.textContent = 'Sign in'; err.hidden = false; err.textContent = /invalid/i.test(error.message) ? 'Email or password is wrong.' : error.message; return; }
+  await afterSignIn(data.session);
+}
+async function afterSignIn(session){
+  me = session.user.email || '';
+  const { data, error } = await sb.rpc('pss_whoami');
+  if (error || !data || !data.teacher){ auth = 'notTeacher'; render(); return; }
+  auth = 'ok';
+  try { await loadAll(); subscribe(); } catch (e){ console.error(e); toast("Signed in, but couldn't load the classes. Did setup/supabase.sql run?"); }
   render();
 }
-function addTeam(r){ teams.set([r.cls, r.planet, r.team.toLowerCase()].join('|'), r); }
-function cloudSong(r){ return { ...r, url: sb.storage.from('pss-songs').getPublicUrl(r.file).data.publicUrl }; }
-function onEvent(ev){
-  events.unshift(ev); events = events.slice(0, 300);
+async function signOut(){
+  if (sb){ sb.removeAllChannels(); await sb.auth.signOut(); }
+  teams.clear(); devices.clear(); songs = songs.filter(s => s.local); events = []; classes = []; online = false; me = null;
+  auth = 'signin'; render();
+}
+async function loadAll(){
+  const [c, t, s, e] = await Promise.all([
+    sb.from('pss_classes').select('id,name').order('name'),
+    sb.from('pss_teams').select('*'),
+    sb.from('pss_songs').select('*').order('created_at', { ascending: false }),
+    sb.from('pss_events').select('*').order('created_at', { ascending: false }).limit(300)
+  ]);
+  if (c.error || t.error) throw c.error || t.error;
+  classes = c.data;
+  if (!classByName(cls) && classes.length) cls = classes[0].name;
+  teams.clear(); t.data.forEach(r => teams.set(r.id, r));
+  songs = songs.filter(x => x.local).concat(await signed(s.data || []));
+  events = e.data || [];
+  await loadDevices();
+  online = true;
+}
+async function loadDevices(){
+  const { data } = await sb.rpc('pss_team_devices');
+  devices.clear(); (data || []).forEach(r => devices.set(r.team_id, r.devices));
+}
+// The bucket is private: songs play through links that work for a few hours, made fresh when needed.
+async function signed(rows){
+  const files = rows.map(r => r.file).filter(Boolean);
+  const urls = new Map();
+  for (let i = 0; i < files.length; i += 100){
+    const { data } = await sb.storage.from('pss-songs').createSignedUrls(files.slice(i, i + 100), 6 * 3600);
+    (data || []).forEach(d => { if (d.signedUrl) urls.set(d.path, d.signedUrl); });
+  }
+  return rows.map(r => ({ ...r, url: urls.get(r.file) || '' }));
+}
+function subscribe(){
+  sb.channel('pss-teacher')
+    .on('postgres_changes', { event: 'INSERT', schema: 'public', table: 'pss_events' }, p => { onEvent(p.new); loadDevicesSoon(); })
+    .on('postgres_changes', { event: '*', schema: 'public', table: 'pss_teams' }, p => {
+      if (p.eventType === 'DELETE') teams.delete(p.old.id); else if (p.new && p.new.id) teams.set(p.new.id, p.new);
+      refresh();
+    })
+    .on('postgres_changes', { event: 'INSERT', schema: 'public', table: 'pss_songs' }, async p => { const [r] = await signed([p.new]); songs = songs.filter(x => x.id !== r.id); songs.unshift(r); refresh(); })
+    .on('postgres_changes', { event: 'DELETE', schema: 'public', table: 'pss_songs' }, p => { songs = songs.filter(x => x.local || x.id !== p.old.id); refresh(); })
+    .subscribe(st => { const was = online; online = st === 'SUBSCRIBED' || (st !== 'CLOSED' && st !== 'CHANNEL_ERROR' && st !== 'TIMED_OUT' && online); if (was !== online) paintConn(); });
+}
+let devT = 0;
+function loadDevicesSoon(){ clearTimeout(devT); devT = setTimeout(() => loadDevices().then(refresh), 1500); }
+function onEvent(raw){
+  events.unshift(raw); events = events.slice(0, 300);
+  const ev = named(raw);
   const g = ev.info && ev.info.genre ? GMAP[ev.info.genre] : null;
   let text = `${ev.cls} · ${ev.planet} · ${ev.team} ${ev.what}`;
   if (/^chose /.test(ev.what) && g) text = `${ev.cls} · ${ev.planet} is building ${g.name}`;
@@ -62,6 +127,80 @@ function onEvent(ev){
   const card = document.querySelector(`[data-planet="${ev.cls}|${ev.planet}"]`);
   if (card){ card.classList.remove('flash'); void card.offsetWidth; card.classList.add('flash'); }
 }
+
+/* ---------- teacher actions on classes, teams and songs ---------- */
+async function addClass(name){
+  name = String(name || '').trim().slice(0, 20); if (!name) return;
+  if (classByName(name)){ toast(`${name} is already there`); return; }
+  const { data, error } = await sb.from('pss_classes').insert({ name }).select('id,name').single();
+  if (error){ toast('Could not add the class'); console.error(error); return; }
+  classes.push(data); classes.sort((a, b) => a.name.localeCompare(b.name));
+  if (!classByName(cls)) cls = name;
+}
+// Every MP3 file under a folder of the bucket (a class folder holds one folder per team).
+async function filesUnder(prefix){
+  const out = [];
+  const { data } = await sb.storage.from('pss-songs').list(prefix, { limit: 1000 });
+  for (const f of data || []){
+    if (f.id) out.push(`${prefix}/${f.name}`);         // a file
+    else out.push(...await filesUnder(`${prefix}/${f.name}`));   // a folder
+  }
+  return out;
+}
+async function removeFiles(paths){
+  for (let i = 0; i < paths.length; i += 100){ const { error } = await sb.storage.from('pss-songs').remove(paths.slice(i, i + 100)); if (error) throw error; }
+}
+async function deleteClass(id){
+  const c = classById(id); if (!c) return;
+  try {
+    const files = new Set([...songs.filter(s => !s.local && teams.get(s.team_id)?.class_id === id).map(s => s.file), ...await filesUnder(id)]);
+    await removeFiles([...files].filter(Boolean));
+    const { error } = await sb.from('pss_classes').delete().eq('id', id); if (error) throw error;
+  } catch (e){ console.error(e); toast('Could not delete the class'); return; }
+  [...teams.values()].filter(t => t.class_id === id).forEach(t => teams.delete(t.id));
+  songs = songs.filter(s => s.local || teams.has(s.team_id)); events = events.filter(e => teams.has(e.team_id));
+  classes = classes.filter(x => x.id !== id);
+  if (cls === c.name) cls = classes[0]?.name || CLASSES[0];
+  toast(`${c.name} deleted`);
+}
+async function addTeam(planet, name){
+  const c = classByName(cls); name = String(name || '').trim().slice(0, 40);
+  if (!c || !name) return null;
+  const { data, error } = await sb.from('pss_teams').insert({ class_id: c.id, planet, name }).select('*').single();
+  if (error){ toast(/duplicate|unique/i.test(error.message) ? `${planet} already has a team called ${name}` : 'Could not add the team'); return null; }
+  teams.set(data.id, data); return data;
+}
+async function deleteTeam(id){
+  const t = teams.get(id); if (!t) return;
+  try {
+    const files = new Set([...songs.filter(s => s.team_id === id).map(s => s.file), ...await filesUnder(`${t.class_id}/${id}`)]);
+    await removeFiles([...files].filter(Boolean));
+    const { error } = await sb.from('pss_teams').delete().eq('id', id); if (error) throw error;
+  } catch (e){ console.error(e); toast('Could not delete the team'); return; }
+  teams.delete(id); songs = songs.filter(s => s.team_id !== id); events = events.filter(e => e.team_id !== id);
+  toast(`${t.name} deleted`);
+}
+async function newCode(id){
+  const { data, error } = await sb.rpc('pss_new_team_code', { p_team: id });
+  if (error){ toast('Could not make a new code'); return; }
+  const t = teams.get(id); if (t) t.join_code = data; devices.set(id, 0);
+  toast('New code made. The team types it on their iPad.');
+}
+async function setJoining(id, open){
+  const { data, error } = await sb.from('pss_teams').update({ joining_open: open }).eq('id', id).select('*').single();
+  if (error){ toast('Could not change that'); return; }
+  teams.set(id, data);
+}
+async function deleteSong(s){
+  if (s.local){ await localDel(s.id); }
+  else {
+    if (s.file){ const { error } = await sb.storage.from('pss-songs').remove([s.file]); if (error) console.warn(error); }
+    const { error } = await sb.from('pss_songs').delete().eq('id', s.id);
+    if (error){ toast('Could not remove the song'); return; }
+  }
+  songs = songs.filter(x => x !== s);
+}
+
 let bannerT = 0;
 function banner(text, p){
   document.querySelectorAll('.banner').forEach(b => b.remove());
@@ -85,7 +224,7 @@ async function addFiles(files){
   let n = 0;
   for (const f of files){
     const m = f.name.replace(/\.mp3$/i, '').split(/[-–]/).map(s => s.trim().replace(/_/g, ' '));
-    const c = CLASSES.find(x => x.toLowerCase() === (m[0] || '').toLowerCase()) || cls;
+    const c = [...classes.map(x => x.name), ...CLASSES].find(x => x.toLowerCase() === (m[0] || '').toLowerCase()) || cls;
     const p = PLANETS.find(x => x.id.toLowerCase() === (m[1] || '').toLowerCase());
     const rec = { id: 'local-' + Date.now() + '-' + n, cls: c, planet: p ? p.id : 'Mercury', team: m.slice(2).join(' ') || f.name, title: '', genre: null, lyrics: '', created_at: new Date().toISOString(), blob: f };
     await localPut(rec); songs.unshift({ ...rec, url: URL.createObjectURL(f), local: true }); n++;
@@ -95,22 +234,36 @@ async function addFiles(files){
 
 /* ---------- render ---------- */
 function render(){
+  if (auth === 'loading'){ app.innerHTML = '<div class="gate"><h1>Planet Song Teacher</h1><p class="muted">Connecting…</p></div>'; return; }
+  if (auth === 'signin' || auth === 'notTeacher'){ app.innerHTML = renderSignIn(); return; }
   const tabs = [['live', 'Live'], ['songs', 'Songs'], ['suno', 'Suno']];
   app.innerHTML = `<div class="top">
       <h1>Planet Song Teacher</h1>
-      <div class="classes" role="group" aria-label="Class">${CLASSES.map(c => `<button data-act="cls" data-v="${c}" aria-pressed="${c === cls}">${c}</button>`).join('')}</div>
+      <div class="classes" role="group" aria-label="Class">${classes.map(c => `<button data-act="cls" data-v="${esc(c.name)}" aria-pressed="${c.name === cls}">${esc(c.name)}</button>`).join('')}${auth === 'ok' ? '<button data-act="classes" aria-label="Add or delete classes" title="Classes">＋</button>' : ''}</div>
       <nav class="tabs" role="tablist">${tabs.map(([id, n]) => `<button class="tab" role="tab" data-act="view" data-v="${id}" aria-selected="${view === id}">${n}</button>`).join('')}</nav>
       <span class="conn" id="conn"><i></i><span></span></span>
-      <button class="btn primary" data-act="qr">Show QR for ${cls}</button>
+      <button class="btn primary" data-act="qr">Show QR</button>
+      ${auth === 'ok' ? `<button class="btn ghost sm" data-act="signout" title="Signed in as ${esc(me)}">Sign out</button>` : ''}
     </div>
-    <main id="main">${body()}</main>`;
+    <main id="main">${body()}</main>${sheet ? renderSheet() : ''}`;
   paintConn();
 }
-function refresh(){ const m = document.getElementById('main'); if (m && !document.activeElement?.closest?.('audio')) m.innerHTML = body(); else if (m && view === 'live') m.innerHTML = body(); }
+function renderSignIn(){
+  return `<form class="gate card" id="signForm" autocomplete="on">
+    <h1>Planet Song Teacher</h1>
+    ${auth === 'notTeacher' ? `<p><b>${esc(me)}</b> is signed in but is not a teacher yet.</p><p class="muted small">In Supabase, run <b>setup/make-teacher.sql</b> with this email, then sign in again.</p><button class="btn" type="button" data-act="signout">Sign out</button>`
+    : `<p class="muted">Sign in with your teacher account. Learners never sign in: they join with their team code.</p>
+    <label class="field"><span class="label">Email</span><input type="email" id="email" required autocomplete="username" inputmode="email"></label>
+    <label class="field"><span class="label">Password</span><input type="password" id="password" required autocomplete="current-password"></label>
+    <p id="signErr" class="small" style="color:var(--rec);margin:0" hidden></p>
+    <button class="btn primary" data-act="signin" type="submit">Sign in</button>`}
+  </form>`;
+}
+function refresh(){ if (auth !== 'ok' && auth !== 'local') return; repaintSheet(); const m = document.getElementById('main'); if (m && !document.activeElement?.closest?.('audio')) m.innerHTML = body(); else if (m && view === 'live') m.innerHTML = body(); }
 function paintConn(){
   const el = document.getElementById('conn'); if (!el) return;
   el.className = 'conn' + (online ? ' on' : '');
-  el.querySelector('span').textContent = online ? 'Live' : CONFIG.mode === 'supabase' ? 'Not connected' : 'Offline mode';
+  el.querySelector('span').textContent = online ? 'Live' : cloud ? 'Not connected' : 'Offline mode';
 }
 function body(){
   if (view === 'songs') return renderSongs();
@@ -118,10 +271,13 @@ function body(){
   return renderLive();
 }
 
-function teamsOf(c, planet){ return [...teams.values()].filter(t => t.cls === c && t.planet === planet).sort(planetOrder); }
-function songOf(t){ return songs.find(s => s.cls === t.cls && s.planet === t.planet && String(s.team).toLowerCase() === String(t.team).toLowerCase()); }
+function teamsOf(c, planet){ return [...teams.values()].map(teamView).filter(t => t.cls === c && t.planet === planet).sort(planetOrder); }
+function songOf(t){ return songs.map(named).find(s => (t.id && s.team_id === t.id) || (!s.team_id && s.cls === t.cls && s.planet === t.planet && String(s.team).toLowerCase() === String(t.team).toLowerCase())); }
 function renderLive(){
-  const setup = CONFIG.mode !== 'supabase' ? `<div class="card" style="margin-bottom:14px"><b>Live updates are off.</b> <span class="muted">Teams' progress appears here once the cloud link is set up (see setup/README in the project). You can still add songs the teams AirDrop to you on the Songs tab.</span></div>` : '';
+  const setup = !cloud ? `<div class="card" style="margin-bottom:14px"><b>Live updates are off.</b> <span class="muted">Teams' progress appears here once the cloud link is set up (see setup/README in the project). You can still add songs the teams AirDrop to you on the Songs tab.</span></div>`
+    : !classes.length ? `<div class="card" style="margin-bottom:14px"><h2 style="font-size:24px">Add your classes</h2><p class="muted">Then add a team on each planet. Every team gets its own secret code to join with.</p><div class="chips">${CLASSES.map(c => `<button class="btn" data-act="quickClass" data-v="${c}">＋ ${c}</button>`).join('')}<button class="btn ghost" data-act="classes">Another class…</button></div></div>`
+    : `<p class="muted small" style="margin:0 0 12px">Add a team on each planet, then tap its 🔑 code to show the team its own QR code. A team's code only opens that team.</p>`;
+  if (cloud && !classByName(cls)) return setup;
   const evs = events.slice(0, 80);
   return setup + `<div class="live">
     <div class="board">${PLANETS.map(p => {
@@ -129,18 +285,21 @@ function renderLive(){
       return `<div class="planet" data-planet="${cls}|${p.id}" style="--pc:${p.orb[0]}">
         <div class="ph">${orb(p, 40)}<h3>${p.id}</h3></div>
         ${ts.length ? ts.map(t => { const i = t.info || {}, g = GMAP[i.genre], s = songOf(t);
-          return `<div class="team"><b>${esc(t.team)}</b>
+          const dv = devices.get(t.id) || 0;
+          return `<div class="team"><div class="trow"><b>${esc(t.team)}</b>${t.join_code ? `<button class="codechip" data-act="team" data-id="${t.id}" aria-label="Show code for ${esc(t.team)}">🔑 ${esc(t.join_code)}</button>` : ''}</div>
+            ${t.join_code ? `<span class="small muted">📱 ${dv} iPad${dv === 1 ? '' : 's'}${t.joining_open ? '' : ' · joining closed'}${t.members && t.members.length ? ' · ' + esc(t.members.join(', ')) : ''}</span>` : ''}
             <div class="chips">${g ? `<span class="tag genre">${g.name}</span>` : '<span class="tag">No genre yet</span>'}${i.lyricLines ? `<span class="tag">${i.lyricLines} lines</span>` : ''}${i.voices ? `<span class="tag">🎤 ${i.voices}</span>` : ''}${s ? '<span class="tag song">Song in ✓</span>' : ''}</div>
             <span class="small muted">${esc(i.last || '')} · ${ago(t.updated_at)}</span></div>`; }).join('')
         : '<span class="empty">No team yet</span>'}
+        ${auth === 'ok' ? `<button class="btn sm ghost addteam" data-act="addTeam" data-v="${p.id}">＋ Team</button>` : ''}
       </div>`; }).join('')}</div>
     <aside class="card"><h2 style="font-size:22px;margin-bottom:10px">Live feed</h2>
-      <div class="feed">${evs.length ? evs.map(e => `<div class="ev ${e.cls === cls ? '' : 'dim'}">${PMAP[e.planet] ? orb(PMAP[e.planet], 28) : ''}<div style="flex:1;min-width:0"><b>${esc(e.cls)} · ${esc(e.planet)}</b> <span>${esc(e.team)} ${esc(e.what)}</span></div><span class="when">${ago(e.created_at)}</span></div>`).join('') : '<span class="muted small">Nothing yet. When teams scan the QR code and start, their steps show up here.</span>'}</div>
+      <div class="feed">${evs.length ? evs.map(named).map(e => `<div class="ev ${e.cls === cls ? '' : 'dim'}">${PMAP[e.planet] ? orb(PMAP[e.planet], 28) : ''}<div style="flex:1;min-width:0"><b>${esc(e.cls)} · ${esc(e.planet)}</b> <span>${esc(e.team)} ${esc(e.what)}</span></div><span class="when">${ago(e.created_at)}</span></div>`).join('') : '<span class="muted small">Nothing yet. When teams scan the QR code and start, their steps show up here.</span>'}</div>
     </aside></div>`;
 }
 
 function renderSongs(){
-  const list = songs.filter(s => s.cls === cls).sort(planetOrder);
+  const list = songs.map(named).filter(s => s.cls === cls).sort(planetOrder);
   return `<div class="card" style="display:flex;gap:12px;align-items:center;flex-wrap:wrap;margin-bottom:14px">
       <h2 style="font-size:24px;flex:1">${cls} songs <span class="muted small">(${list.length})</span></h2>
       <label class="btn" for="files">➕ Add MP3s from Files</label><input type="file" id="files" accept="audio/mpeg,.mp3" multiple hidden>
@@ -149,7 +308,7 @@ function renderSongs(){
       return `<div class="card song">${orb(p, 54)}
         <div style="min-width:0"><h3 style="font-size:21px">${esc(s.planet)} · ${esc(s.title || s.team)}</h3>
           <div class="small muted">${esc(s.team)}${s.genre ? ' · ' + esc(GMAP[s.genre]?.name || s.genre) : ''} · ${ago(s.created_at)}${s.local ? ' · from Files' : ''}</div>
-          <audio controls preload="none" src="${s.url}"></audio>
+          <audio controls preload="none" src="${esc(s.url)}"></audio>
           ${s.lyrics ? `<details><summary>Lyrics</summary><div class="lyrics">${esc(s.lyrics)}</div></details>` : ''}</div>
         <div class="acts"><button class="btn sm" data-act="share" data-id="${esc(s.id)}">Save / share</button><button class="btn sm ghost" data-act="del" data-id="${esc(s.id)}">Remove</button></div>
       </div>`; }).join('') : `<div class="card muted">No songs from ${cls} yet. Teams press "Send to teacher" on their Send page.</div>`}</div>`;
@@ -157,7 +316,7 @@ function renderSongs(){
 
 function latestPerPlanet(c){
   const out = [];
-  PLANETS.forEach(p => { const s = songs.filter(x => x.cls === c && x.planet === p.id).sort((a, b) => new Date(b.created_at) - new Date(a.created_at))[0]; if (s) out.push(s); });
+  PLANETS.forEach(p => { const s = songs.map(named).filter(x => x.cls === c && x.planet === p.id).sort((a, b) => new Date(b.created_at) - new Date(a.created_at))[0]; if (s) out.push(s); });
   return out;
 }
 function field(label, text, id){ return `<div class="field"><div class="lab"><span class="label">${label}</span><button class="btn sm" data-act="copy" data-for="${id}">Copy</button></div><textarea id="${id}" rows="${Math.min(12, Math.max(2, text.split('\n').length + 1))}" readonly>${esc(text)}</textarea></div>`; }
@@ -228,13 +387,55 @@ async function saveBlob(blobOrUrl, name){
 }
 
 /* ---------- QR ---------- */
+const qrImg = (url, cell) => { const qr = window.qrcode(0, 'M'); qr.addData(url); qr.make(); return qr.createDataURL(cell, 2); };
+// The board QR only opens the studio; every team still needs its own code to join.
 function showQR(){
-  const url = CONFIG.studioUrl + '?c=' + encodeURIComponent(cls);
-  const qr = window.qrcode(0, 'M'); qr.addData(url); qr.make();
+  const url = cloud ? CONFIG.studioUrl : CONFIG.studioUrl + '?c=' + encodeURIComponent(cls);
   const o = document.createElement('div'); o.className = 'qr';
-  o.innerHTML = `<h2>Scan to make your planet song</h2><div class="cls">${esc(cls)}</div><div class="code"><img alt="QR code" src="${qr.createDataURL(10, 2)}"></div><div style="font-weight:800">${esc(url)}</div><div class="small" style="color:#556">Tap anywhere to close</div>`;
+  o.innerHTML = `<h2>Scan to make your planet song</h2><div class="cls">${esc(cls)}</div><div class="code"><img alt="QR code" src="${qrImg(url, 10)}"></div><div style="font-weight:800">${esc(url)}</div>${cloud ? '<div style="font-size:22px;font-weight:800">Then type your team code</div>' : ''}<div class="small" style="color:#556">Tap anywhere to close</div>`;
   o.addEventListener('click', () => o.remove()); document.body.appendChild(o);
 }
+// One team's own QR: it opens the studio with the team's code filled in. Show it to that team only.
+function showTeamQR(t){
+  const url = CONFIG.studioUrl + '?t=' + encodeURIComponent(t.join_code);
+  const o = document.createElement('div'); o.className = 'qr';
+  o.innerHTML = `<h2>${esc(t.name)}</h2><div class="small" style="font-size:22px;font-weight:800;color:#556">${esc(classById(t.class_id)?.name || '')} · ${esc(t.planet)}</div><div class="code"><img alt="QR code for ${esc(t.name)}" src="${qrImg(url, 10)}"></div><div class="cls" style="letter-spacing:.15em">${esc(t.join_code)}</div><div class="small" style="color:#556">Only for this team · tap anywhere to close</div>`;
+  o.addEventListener('click', () => o.remove()); document.body.appendChild(o);
+}
+
+/* ---------- pop-ups: one team, adding a team, classes ---------- */
+function renderSheet(){
+  let h = '';
+  if (sheet.kind === 'addTeam'){
+    const p = PMAP[sheet.planet];
+    h = `<form id="addTeamForm" class="stack"><div class="ph">${orb(p, 44)}<h2>New ${esc(sheet.planet)} team in ${esc(cls)}</h2></div>
+      <label class="field"><span class="label">Team name</span><input type="text" id="teamName" maxlength="40" placeholder="e.g. The Red Rovers" autocomplete="off" required></label>
+      <p class="small muted" style="margin:0">Use a team name, not children's full names. The team gets its own code to join with.</p>
+      <div class="acts"><button class="btn primary" type="submit">Add team</button><button class="btn ghost" type="button" data-act="closeSheet">Cancel</button></div></form>`;
+  } else if (sheet.kind === 'team'){
+    const t = teams.get(sheet.id); if (!t){ sheet = null; return ''; }
+    const p = PMAP[t.planet], dv = devices.get(t.id) || 0, n = songs.filter(s => s.team_id === t.id).length;
+    h = `<div class="stack"><div class="ph">${p ? orb(p, 44) : ''}<div><h2>${esc(t.name)}</h2><div class="muted small">${esc(classById(t.class_id)?.name || '')} · ${esc(t.planet)} · 📱 ${dv} iPad${dv === 1 ? '' : 's'} joined · ${n} song${n === 1 ? '' : 's'}</div></div></div>
+      <div class="bigcode">${esc(t.join_code)}</div>
+      <p class="small muted" style="margin:0;text-align:center">${t.joining_open ? 'The team types this code in the studio, or scans the team QR.' : 'Joining is closed: this code does not work right now. iPads already in the team carry on.'}</p>
+      <div class="acts" style="justify-content:center"><button class="btn primary" data-act="teamQR" data-id="${t.id}">Show team QR</button>
+        <button class="btn" data-act="joining" data-id="${t.id}">${t.joining_open ? 'Close joining' : 'Open joining'}</button>
+        <button class="btn" data-act="newCode" data-id="${t.id}">New code</button></div>
+      <p class="small muted" style="margin:0">New code: the old code stops working and the team's iPads are signed out of the team until they type the new one. Their work on the iPad is kept.</p>
+      <div class="acts"><button class="btn ghost" data-act="delTeam" data-id="${t.id}">Delete team and its songs</button><button class="btn" data-act="closeSheet">Done</button></div></div>`;
+  } else if (sheet.kind === 'classes'){
+    h = `<div class="stack"><h2>Classes</h2>
+      ${classes.map(c => { const tn = [...teams.values()].filter(t => t.class_id === c.id).length, sn = songs.filter(s => teams.get(s.team_id)?.class_id === c.id).length;
+        return `<div class="crow"><b>${esc(c.name)}</b><span class="muted small" style="flex:1">${tn} team${tn === 1 ? '' : 's'} · ${sn} song${sn === 1 ? '' : 's'}</span><button class="btn sm ghost" data-act="delClass" data-id="${c.id}">Delete</button></div>`; }).join('') || '<p class="muted">No classes yet.</p>'}
+      <form id="addClassForm" class="row"><input type="text" id="className" maxlength="20" placeholder="Class name, e.g. 6M" autocomplete="off" required><button class="btn primary" type="submit">Add</button></form>
+      <p class="small muted" style="margin:0">Deleting a class deletes its teams, their codes and all its songs. It cannot be undone.</p>
+      <div class="acts"><button class="btn" data-act="closeSheet">Done</button></div></div>`;
+  }
+  return `<div class="sheet-bg" data-act="closeSheetBg"><div class="sheet card" role="dialog" aria-modal="true">${h}</div></div>`;
+}
+function openSheet(s){ sheet = s; render(); const f = document.querySelector('.sheet input'); if (f) f.focus(); }
+function closeSheet(){ sheet = null; document.querySelector('.sheet-bg')?.remove(); }
+function repaintSheet(){ const bg = document.querySelector('.sheet-bg'); if (!bg || !sheet || sheet.kind !== 'team') return; const html = renderSheet(); const tmp = document.createElement('div'); tmp.innerHTML = html; bg.replaceWith(tmp.firstElementChild); }
 
 /* ---------- events ---------- */
 app.addEventListener('click', async e => {
@@ -242,28 +443,47 @@ app.addEventListener('click', async e => {
   const v = b.dataset.v;
   switch (b.dataset.act){
     case 'cls': cls = v; setPref('cls', v); render(); break;
+    case 'signout': signOut(); break;
+    case 'classes': openSheet({ kind: 'classes' }); break;
+    case 'quickClass': await addClass(v); render(); break;
+    case 'addTeam': openSheet({ kind: 'addTeam', planet: v }); break;
+    case 'team': openSheet({ kind: 'team', id: b.dataset.id }); break;
+    case 'teamQR': { const t = teams.get(b.dataset.id); if (t) showTeamQR(t); } break;
+    case 'joining': { const t = teams.get(b.dataset.id); if (t){ await setJoining(t.id, !t.joining_open); render(); } } break;
+    case 'newCode': if (b.dataset.sure !== '1'){ b.dataset.sure = '1'; b.textContent = 'Tap again for a new code'; break; } await newCode(b.dataset.id); render(); break;
+    case 'delTeam': if (b.dataset.sure !== '1'){ b.dataset.sure = '1'; b.textContent = 'Tap again to delete for good'; break; } b.disabled = true; await deleteTeam(b.dataset.id); sheet = null; render(); break;
+    case 'delClass': if (b.dataset.sure !== '1'){ b.dataset.sure = '1'; b.textContent = 'Tap again: deletes teams and songs'; break; } b.disabled = true; await deleteClass(b.dataset.id); render(); break;
+    case 'closeSheet': closeSheet(); break;
+    case 'closeSheetBg': if (e.target === b) closeSheet(); break;
     case 'view': view = v; render(); break;
     case 'qr': showQR(); break;
     case 'copy': { const t = document.getElementById(b.dataset.for); try { await navigator.clipboard.writeText(t.value); toast('Copied'); } catch (x){ t.select(); toast('Selected: tap Copy'); } } break;
-    case 'share': { const s = songs.find(x => String(x.id) === b.dataset.id); if (s) saveBlob(s.local ? s.blob : s.url, fileBase(s) + '.mp3'); } break;
+    case 'share': { const s = songs.find(x => String(x.id) === b.dataset.id); if (s) saveBlob(s.local ? s.blob : s.url, fileBase(named(s)) + '.mp3'); } break;
     case 'del': {
       if (b.dataset.sure !== '1'){ b.dataset.sure = '1'; b.textContent = 'Tap again'; break; }
       const s = songs.find(x => String(x.id) === b.dataset.id); if (!s) break;
-      if (s.local) await localDel(s.id); else if (sb){ await sb.from('pss_songs').delete().eq('id', s.id); if (s.file) await sb.storage.from('pss-songs').remove([s.file]); }
-      songs = songs.filter(x => x !== s); render();
+      await deleteSong(s); render();
     } break;
     case 'medley': makeMedley(); break;
     case 'shareMedley': if (medley) saveBlob(medley.blob, `${cls} - Solar System Medley.mp3`); break;
   }
 });
+app.addEventListener('submit', async e => {
+  e.preventDefault();
+  if (e.target.id === 'signForm') signIn(document.getElementById('email').value, document.getElementById('password').value);
+  else if (e.target.id === 'addTeamForm'){ const t = await addTeam(sheet.planet, document.getElementById('teamName').value); if (t){ sheet = { kind: 'team', id: t.id }; render(); } }
+  else if (e.target.id === 'addClassForm'){ await addClass(document.getElementById('className').value); render(); }
+});
 app.addEventListener('change', e => { if (e.target.id === 'files' && e.target.files.length) addFiles([...e.target.files]); });
-setInterval(() => { if (view === 'live' && !document.querySelector('.banner')) refresh(); }, 30000);
+setInterval(() => { if (view === 'live' && !document.querySelector('.banner') && !sheet) refresh(); }, 30000);
+// fresh play links before the old ones run out
+setInterval(async () => { if (auth === 'ok'){ const fresh = await signed(songs.filter(s => !s.local)); const byId = new Map(fresh.map(r => [r.id, r.url])); songs.forEach(s => { if (!s.local && byId.get(s.id)) s.url = byId.get(s.id); }); refresh(); } }, 5 * 3600 * 1000);
 
 // ?demo shows made-up teams so the screens can be tried before any class has started.
 if (/[?&]demo/.test(location.search)){
   const now = Date.now(), ts = (m) => new Date(now - m * 60000).toISOString();
   [['6M', 'Earth', 'Blue Crew', 'rap', 12, 1, 'recorded Voice 1', 2], ['6M', 'Mars', 'Red Rappers', 'trap', 8, 2, 'is recording Voice 2', 1], ['6M', 'Saturn', 'Ring Kings', 'jazz', 4, 0, 'chose Jazz', 6], ['6M', 'Neptune', 'Deep Blue', 'amapiano', 0, 0, 'joined', 9], ['6L', 'Venus', 'Hot Stuff', 'pop', 6, 1, 'made their MP3', 3]]
-    .forEach(([c, p, t, g, l, v, last, m]) => { addTeam({ cls: c, planet: p, team: t, info: { genre: g, lyricLines: l, voices: v, last }, updated_at: ts(m) }); events.push({ cls: c, planet: p, team: t, what: last, info: { genre: g }, created_at: ts(m) }); });
+    .forEach(([c, p, t, g, l, v, last, m], i) => { const id = 'demo' + i; teams.set(id, { id, class_id: c, planet: p, name: t, info: { genre: g, lyricLines: l, voices: v, last }, updated_at: ts(m) }); events.push({ cls: c, planet: p, team: t, what: last, info: { genre: g }, created_at: ts(m) }); });
   events.sort((a, b) => new Date(b.created_at) - new Date(a.created_at));
   setTimeout(() => onEvent({ cls: '6M', planet: 'Jupiter', team: 'Storm Squad', what: 'chose Rap', info: { genre: 'rap' }, created_at: new Date().toISOString() }), 2500);
 }

@@ -3,14 +3,16 @@
 Mr Le Roux's grade 6 planet song project (classes 6L, 6M and 6N). Each team makes a song about its planet.
 
 - **The studio** (this folder's `index.html`, hosted on GitHub Pages) is what the teams open on their iPads by
-  scanning the QR code. They pick their class, planet and team, choose a genre (Rap, Trap, Pop, Rock, Jazz, Latin,
+  scanning the QR code. They join their team with the team's code from the teacher (no accounts), choose a genre (Rap, Trap, Pop, Rock, Jazz, Latin,
   Reggae, Amapiano, Electronic, Funk, Disco, Country), write lyrics with the rhyme finder and syllable counter, build a
   beat, play pads, piano and shaker, record and layer their voices, and send the finished MP3 to the teacher.
   Each planet has its own colours and backdrop. Work saves on the iPad as they go.
-- **Planet Song Teacher** (`teacher/` + `ipad/`) is the teacher's native iPad app: a QR code per class for the board,
+- **Planet Song Teacher** (`teacher/` + `ipad/`) is the teacher's native iPad app: teacher sign-in, classes and teams with a secret join code
+  and QR code per team,
   a live feed and planet board ("6M · Earth is building Rap"), the songs filed by class and planet, a class medley
   MP3 (every planet in order from the Sun) and ready-to-paste Suno title, style and lyrics.
-- **The link** between them is a free Supabase project (`setup/`). Without it the studio still works and teams can
+- **The link** between them is a free Supabase project (`setup/`). The database rules give each team access to
+  its own team only, keep the MP3s in a private bucket, and let only teachers delete anything. Without it the studio still works and teams can
   save their MP3 and AirDrop it; the teacher app can add MP3s from Files.
 
 ## Layout

@@ -4,7 +4,7 @@ import { CLASSES, PLANETS, PMAP, ORDINAL, GENRES, GMAP, SPACE_PADS, SCALES, chor
 import * as E from './engine.js';
 import { loadRhymes, findRhymes, rhymeKey, lineSyllables } from './rhymes.js';
 import * as store from './store.js';
-import { announce, sendSong, connect, linkStatus } from './link.js';
+import { announce, sendSong, connect, linkStatus, cloudOn, myTeam, joinTeam, canSend } from './link.js';
 import { paintBackdrop } from './backdrop.js';
 
 /* ---------- state ---------- */
@@ -13,7 +13,12 @@ let screen = 'join', tab = 'genre';
 let sel = 'beat';             // selected track id in the Studio
 let fromBar = 0;              // where Play starts
 const urlClass = (() => { try { const c = new URLSearchParams(location.search).get('c'); return CLASSES.includes(c) ? c : null; } catch (e){ return null; } })();
-let draft = { cls: urlClass || store.getPref('cls', null), planet: null, team: '', members: ['', '', ''] };
+// A team's own QR code (from the teacher app) opens the studio with ?t=<team code>.
+const urlCode = (() => { try { return (new URLSearchParams(location.search).get('t') || '').toUpperCase().replace(/[^A-Z0-9]/g, '').slice(0, 6); } catch (e){ return ''; } })();
+const newDraft = () => ({ cls: urlClass || store.getPref('cls', null), planet: null, team: '', members: ['', '', ''], code: urlCode });
+let draft = newDraft();
+let joined = null;            // the team this iPad has joined (cloud mode), from the teacher's team code
+let codeForm = !!urlCode;     // show the code box even though this iPad is already in a team
 let lastFocus = null;         // lyrics caret {id, a, b}
 let rec = null;               // the recording in progress
 let mp3 = null;               // {blob, url, secs}
@@ -110,7 +115,7 @@ function renderJoin(){
     <h1>Planet Song Studio</h1>
     <p class="lede">Make your planet's song as a team: pick a style, write rhyming lyrics, build a beat, play the piano, record your voices and send the finished song to your teacher.</p>
     <div class="join-grid">
-      <div class="glass card stack" style="gap:20px">
+      ${cloudOn() ? renderTeamJoin() : `<div class="glass card stack" style="gap:20px">
         <div><div class="step-h"><b>1</b><h2>Your class</h2></div>
           <div class="class-pick">${CLASSES.map(c => `<button class="class-btn" data-act="cls" data-v="${c}" aria-pressed="${draft.cls === c}">${c}</button>`).join('')}</div></div>
         <div><div class="step-h"><b>2</b><h2>Your planet</h2></div>
@@ -122,7 +127,7 @@ function renderJoin(){
           <p id="joinErr" class="small" style="color:var(--rec);margin:0" hidden></p>
           <button class="btn primary" data-act="start" style="min-height:60px;font-size:21px">🚀 Start our song</button>
         </div>
-      </div>
+      </div>`}
       <div class="stack">
         ${list.length ? `<div class="glass card stack"><h2 style="font-size:24px">Carry on</h2><p class="small muted" style="margin:0">Songs saved on this iPad.</p>
           ${list.map(x => PMAP[x.planet] ? `<button class="saved" data-act="open" data-key="${esc(x.key)}">${orb(PMAP[x.planet], 42)}<span><b>${esc(x.team)}</b><span class="small muted">${esc(x.cls)} · ${esc(x.planet)} · ${new Date(x.updated).toLocaleString([], { weekday: 'short', hour: 'numeric', minute: '2-digit' })}</span></span></button>` : '').join('')}</div>` : ''}
@@ -132,6 +137,33 @@ function renderJoin(){
           <span>💾 Your song saves on this iPad as you work.</span></div>
       </div>
     </div></div>`;
+}
+
+// Cloud mode: the teacher makes the teams, and each team gets a code. The code puts this iPad in that team only.
+function renderTeamJoin(){
+  const names = draft.members.map((m, i) => `<input type="text" data-member="${i}" placeholder="First name ${i + 1}" value="${esc(m)}" maxlength="30" autocomplete="off">`).join('');
+  if (joined && !codeForm){
+    const p = PMAP[joined.planet];
+    return `<div class="glass card stack" style="gap:18px">
+      <div class="step-h"><b>✓</b><h2>Your team</h2></div>
+      <div class="team-found">${p ? orb(p, 64) : ''}<div><h2>${esc(joined.name)}</h2><div class="muted">${esc(joined.cls)} · ${esc(joined.planet)}</div></div></div>
+      <div class="stack" id="members" style="gap:8px">${names}</div>
+      <button class="btn ghost sm" data-act="addMember" style="align-self:flex-start">+ Add a name</button>
+      <button class="btn primary" data-act="startTeam" style="min-height:60px;font-size:21px">🚀 Open our song</button>
+      <button class="btn ghost sm" data-act="otherCode" style="align-self:flex-start">Not your team? Type a different code</button>
+    </div>`;
+  }
+  return `<div class="glass card stack" style="gap:20px">
+    <div class="stack"><div class="step-h"><b>1</b><h2>Your team code</h2></div>
+      <input type="text" id="code" class="code-input" value="${esc(draft.code)}" placeholder="ABC123" maxlength="7" autocomplete="off" autocapitalize="characters" spellcheck="false" aria-label="Team code">
+      <span class="small muted">Your teacher gives each team its own code. Keep it secret from other teams.</span></div>
+    <div class="stack"><div class="step-h"><b>2</b><h2>Your first names</h2></div>
+      <div class="stack" id="members" style="gap:8px">${names}</div>
+      <button class="btn ghost sm" data-act="addMember" style="align-self:flex-start">+ Add a name</button></div>
+    <p id="joinErr" class="small" style="color:var(--rec);margin:0" hidden></p>
+    <button class="btn primary" data-act="joinCode" style="min-height:60px;font-size:21px">🚀 Join our team</button>
+    ${joined ? `<button class="btn ghost sm" data-act="backToTeam" style="align-self:flex-start">Back to ${esc(joined.name)}</button>` : ''}
+  </div>`;
 }
 
 function renderStudio(){
@@ -151,9 +183,9 @@ function renderStudio(){
 }
 function paintLink(){
   const el = $('#link'); if (!el) return;
-  const on = linkStatus() === 'online';
+  const on = canSend(P);
   el.className = 'link-dot' + (on ? ' on' : '');
-  el.querySelector('span').textContent = on ? "Teacher's iPad connected" : 'Working on this iPad';
+  el.querySelector('span').textContent = on ? "Teacher's iPad connected" : cloudOn() && P && !P.teamId ? 'Not in a team yet' : 'Working on this iPad';
 }
 
 /* ---------- genre ---------- */
@@ -509,7 +541,8 @@ function onMotion(e){
 
 /* ---------- send ---------- */
 function renderSend(){
-  const online = linkStatus() === 'online';
+  const online = canSend(P);
+  const needCode = cloudOn() && !online;
   return `<div class="panel-title"><h2>Finish and send</h2><span class="muted">Make your song into an MP3 and send it to your teacher.</span></div>
   <div class="send-grid">
     <div class="glass card stack">
@@ -521,7 +554,8 @@ function renderSend(){
     </div>
     <div class="glass card stack">
       <h3 style="font-size:22px">Send to your teacher</h3>
-      <p class="small muted" style="margin:0">${online ? "Your teacher's iPad is connected. Sending gives them your MP3 and lyrics." : "Your teacher's iPad isn't connected right now. You can still save the MP3 on this iPad and send it another way."}</p>
+      <p class="small muted" style="margin:0">${online ? "Your teacher's iPad is connected. Sending gives them your MP3 and lyrics." : needCode ? 'To send, this iPad needs your team code again (ask your teacher). You can still save the MP3 on this iPad.' : "Your teacher's iPad isn't connected right now. You can still save the MP3 on this iPad and send it another way."}</p>
+      ${needCode ? `<div class="row"><input type="text" id="code2" class="code-input sm" placeholder="Team code" maxlength="7" autocomplete="off" autocapitalize="characters" spellcheck="false" aria-label="Team code"><button class="btn" data-act="rejoin">Join</button></div>` : ''}
       <button class="btn rec" data-act="send" ${mp3 && online ? '' : 'disabled'} style="min-height:56px">📤 Send to teacher</button>
       <a class="btn" id="saveMp3" ${mp3 ? `href="${mp3.url}" download="${esc(fileName())}"` : 'aria-disabled="true" style="opacity:.4;pointer-events:none"'}>💾 Save MP3 on this iPad</a>
       <details><summary class="small" style="min-height:44px;display:flex;align-items:center;font-weight:800">Our lyrics as text</summary><textarea readonly rows="10" style="font-size:14px">${esc(lyricsAsText())}</textarea></details>
@@ -576,6 +610,43 @@ function start(){
   announce(p, existing ? 'is back' : 'joined');
 }
 
+const JOIN_ERR = { wrong_code: "That code didn't work. Check it with your teacher.", too_many_tries: 'Too many wrong codes. Wait a few minutes, then try again.', busy: 'Lots of iPads are joining. Wait a minute and try again.', offline: "Can't reach your teacher's iPad. Check the wifi and try again." };
+async function joinCode(){
+  const err = $('#joinErr'), b = document.querySelector('[data-act=joinCode]');
+  const code = draft.code.replace(/[^A-Z0-9]/g, '');
+  if (code.length < 6){ err.hidden = false; err.textContent = 'Type your 6-letter team code.'; return; }
+  E.audio();
+  b.disabled = true; b.textContent = 'Joining…';
+  const r = await joinTeam(code, draft.members.map(m => m.trim()).filter(Boolean));
+  if (!r.team){ b.disabled = false; b.textContent = '🚀 Join our team'; err.hidden = false; err.textContent = JOIN_ERR[r.error] || JOIN_ERR.offline; return; }
+  joined = r.team; codeForm = false; draft.code = '';
+  try { history.replaceState(null, '', location.pathname); } catch (e){}
+  startTeam(true);
+}
+// Opens the joined team's song on this iPad, or starts it.
+function startTeam(isNew){
+  const t = joined; if (!t) return;
+  E.audio();
+  const names = draft.members.map(m => m.trim()).filter(Boolean);
+  const hit = store.listProjects().map(x => store.loadProject(x.key)).find(p => p && p.teamId === t.id);
+  const p = hit || store.loadProject(store.projectKey(t.cls, t.planet, t.name)) || newProject(t.cls, t.planet, t.name, names.length ? names : (t.members || []));
+  Object.assign(p, { teamId: t.id, cls: t.cls, planet: t.planet, team: t.name });
+  if (names.length) p.members = names;
+  openProject(p);
+  announce(p, hit && !isNew ? 'is back' : 'joined');
+}
+// Send page: the team code again (e.g. the teacher made a new one). It must be this song's team.
+async function rejoin(){
+  const code = ($('#code2').value || '').toUpperCase().replace(/[^A-Z0-9]/g, '');
+  if (code.length < 6){ toast('Type your 6-letter team code.'); return; }
+  const r = await joinTeam(code, P.members);
+  if (!r.team){ toast(JOIN_ERR[r.error] || JOIN_ERR.offline, 3500); return; }
+  joined = r.team;
+  if (P.teamId && P.teamId !== r.team.id){ toast(`That code is for ${r.team.name} (${r.team.planet}), not this song.`, 3500); return; }
+  Object.assign(P, { teamId: r.team.id, cls: r.team.cls, planet: r.team.planet, team: r.team.name });
+  save(true); render(true); toast('Joined! You can send now.');
+}
+
 /* ---------- events ---------- */
 app.addEventListener('click', e => {
   const b = e.target.closest('[data-act]'); if (!b || b.disabled) return;
@@ -586,7 +657,12 @@ app.addEventListener('click', e => {
     case 'addMember': { draft.members.push(''); const i = draft.members.length - 1; $('#members').insertAdjacentHTML('beforeend', `<input type="text" data-member="${i}" placeholder="Name ${i + 1}" maxlength="30" autocomplete="off">`); document.querySelector(`[data-member="${i}"]`).focus(); } break;
     case 'start': start(); break;
     case 'open': { const p = store.loadProject(b.dataset.key); if (p) openProject(p); else toast('Could not open that song.'); } break;
-    case 'home': stopAll(); E.closeMic(); save(true); P = null; screen = 'join'; draft = { cls: urlClass || store.getPref('cls', null), planet: null, team: '', members: ['', '', ''] }; render(); break;
+    case 'home': stopAll(); E.closeMic(); save(true); P = null; screen = 'join'; draft = newDraft(); draft.code = ''; codeForm = false; if (joined) draft.members = [...(joined.members || []), '', ''].slice(0, Math.max(3, (joined.members || []).length)); render(); break;
+    case 'joinCode': joinCode(); break;
+    case 'startTeam': startTeam(false); break;
+    case 'otherCode': codeForm = true; render(); break;
+    case 'backToTeam': codeForm = false; render(); break;
+    case 'rejoin': rejoin(); break;
     case 'tab': stopAll(); E.stop(); listening = null; tab = v; render(); break;
     case 'listen': e.stopPropagation(); listen(v); break;
     case 'genre': listening = null; E.stop(); chooseGenre(v); break;
@@ -659,6 +735,7 @@ app.addEventListener('pointerup', release); app.addEventListener('pointercancel'
 app.addEventListener('input', e => {
   const t = e.target;
   if (t.id === 'team') draft.team = t.value;
+  else if (t.id === 'code'){ const v = t.value.toUpperCase().replace(/[^A-Z0-9]/g, ''); if (t.value !== v) t.value = v; draft.code = v; }
   else if (t.dataset.member != null) draft.members[+t.dataset.member] = t.value;
   else if (t.dataset.txt){ onLyric(t); lastFocus = { id: t.dataset.txt, a: t.selectionStart, b: t.selectionEnd }; }
   else if (t.dataset.lab){ const s = P.sections.find(x => x.id === t.dataset.lab); if (s){ s.label = t.value; save(); } }
@@ -667,7 +744,11 @@ app.addEventListener('input', e => {
 });
 app.addEventListener('submit', e => { if (e.target.id === 'rhymeForm'){ e.preventDefault(); showRhymes($('#rhymeWord').value); } });
 app.addEventListener('keydown', e => {
-  if (e.key === 'Enter' && (e.target.id === 'team' || e.target.dataset.member != null)){ e.preventDefault(); start(); }
+  if (e.key === 'Enter' && (e.target.id === 'team' || e.target.dataset.member != null || e.target.id === 'code')){
+    e.preventDefault();
+    if (!cloudOn()) start(); else if (document.querySelector('[data-act=joinCode]')) joinCode(); else startTeam(false);
+  }
+  if (e.key === 'Enter' && e.target.id === 'code2'){ e.preventDefault(); rejoin(); }
   if (e.key === 'Enter' && e.target.classList.contains('genre')) chooseGenre(e.target.dataset.v);
 });
 const caret = e => { const t = e.target; if (t.dataset && t.dataset.txt){ lastFocus = { id: t.dataset.txt, a: t.selectionStart, b: t.selectionEnd }; document.querySelectorAll('.section.focus').forEach(x => x.classList.remove('focus')); t.closest('.section').classList.add('focus'); } };
@@ -676,3 +757,9 @@ document.addEventListener('selectionchange', () => { const a = document.activeEl
 let rz = 0; addEventListener('resize', () => { clearTimeout(rz); rz = setTimeout(() => { if (screen === 'studio' && tab === 'studio') drawLanes(); }, 120); });
 
 render();
+// Cloud mode: is this iPad already in a team? (The sign-in is kept on the iPad.)
+if (cloudOn()) myTeam().then(t => {
+  joined = t;
+  if (t && !draft.members.some(m => m.trim())) draft.members = [...(t.members || []), '', ''].slice(0, Math.max(3, (t.members || []).length));
+  if (screen === 'join') render(); else paintLink();
+}).catch(() => {});

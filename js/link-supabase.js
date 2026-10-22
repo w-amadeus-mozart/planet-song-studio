@@ -1,7 +1,8 @@
-// Team iPad -> teacher, through Supabase: live updates (pss_events), each team's latest state (pss_teams),
-// finished songs (pss_songs + the MP3 in the pss-songs bucket). See setup/supabase.sql.
+// Team iPad -> teacher, through Supabase. See setup/supabase.sql for the rules the database enforces.
+// Each iPad signs in anonymously (no account, no password) and joins one team with the team's code from the teacher.
+// After that it can only post updates and songs for that team; it never sees other teams or their codes.
 
-let client = null, online = false;
+let client = null, online = false, team = null;
 
 function loadLib(){
   if (window.supabase) return Promise.resolve();
@@ -10,34 +11,62 @@ function loadLib(){
 
 export function create(cfg){
   const ready = loadLib().then(async () => {
-    client = window.supabase.createClient(cfg.url, cfg.key, { auth: { persistSession: false } });
-    const { error } = await client.from('pss_teams').select('team', { head: true, count: 'exact' }).eq('room', cfg.room).limit(1);
-    online = !error;
-    return online;
-  }).catch(() => (online = false));
+    // The sign-in is kept on the iPad, so a team stays joined after the studio is closed.
+    client = window.supabase.createClient(cfg.url, cfg.key, { auth: { persistSession: true, autoRefreshToken: true, storageKey: 'pss-auth' } });
+    const { data } = await client.auth.getSession();
+    if (data.session) await whoami();
+    online = true;
+    return true;
+  }).catch(e => { console.warn(e); online = false; return false; });
 
-  const team = m => ({ room: cfg.room, cls: m.cls, planet: m.planet, team: m.team });
+  async function whoami(){
+    const { data, error } = await client.rpc('pss_whoami');
+    if (error) throw error;
+    team = data && data.team ? data.team : null;
+    return team;
+  }
+
   return {
     ready,
-    status: () => (online ? 'online' : 'offline'),
+    status: () => (online && team ? 'online' : 'offline'),
+    team: () => team,
+    // {team} or {error: 'wrong_code' | 'too_many_tries' | 'offline' | ...}
+    async join(code, members){
+      await ready; if (!client) return { error: 'offline' };
+      try {
+        const { data: s } = await client.auth.getSession();
+        if (!s.session){
+          const { error } = await client.auth.signInAnonymously();
+          if (error) return { error: /rate|limit/i.test(error.message) ? 'busy' : 'offline' };
+        }
+        const { data, error } = await client.rpc('pss_join_team', { p_code: code, p_members: members || [] });
+        if (error) return { error: 'offline' };
+        if (data.team){ team = data.team; online = true; }
+        return data;
+      } catch (e){ console.warn(e); return { error: 'offline' }; }
+    },
+    async leave(){
+      await ready; if (!client) return;
+      const { data: s } = await client.auth.getSession();
+      if (s.session) await client.from('pss_members').delete().eq('user_id', s.session.user.id);
+      team = null;
+    },
     async send(m){
-      await ready; if (!client) return false;
-      const { kind, what, ...info } = m;
-      const a = await client.from('pss_events').insert({ ...team(m), what, info });
-      const b = await client.from('pss_teams').upsert({ ...team(m), info: { ...info, last: what }, updated_at: new Date().toISOString() });
-      online = !a.error && !b.error;
-      return online;
+      await ready; if (!client || !team) return false;
+      const { what, members, ...info } = m;
+      const { error } = await client.rpc('pss_team_update', { p_what: what, p_info: info, p_members: members && members.length ? members : null });
+      if (error && /not in a team/i.test(error.message)) team = null;   // the teacher gave the team a new code
+      online = !error || online;
+      return !error;
     },
     async upload(meta, mp3){
-      await ready; if (!client) return false;
-      const safe = s => String(s).replace(/[^\w-]+/g, '_');
-      const file = `${safe(cfg.room)}/${safe(meta.cls)}/${safe(meta.planet)}-${safe(meta.team)}-${Date.now()}.mp3`;
+      await ready; if (!client || !team) return false;
+      const file = `${team.class_id}/${team.id}/${Date.now()}-${Math.random().toString(36).slice(2, 8)}.mp3`;
       const up = await client.storage.from('pss-songs').upload(file, mp3, { contentType: 'audio/mpeg', upsert: false });
-      if (up.error) return false;
-      const { lyrics, title, genre, ...info } = meta;
-      const row = await client.from('pss_songs').insert({ ...team(meta), title, genre, lyrics, info, file });
-      if (row.error) return false;
-      await this.send({ ...meta, kind: 'update', what: 'sent their song' });
+      if (up.error){ console.warn(up.error); return false; }
+      const { lyrics, title, genre, members, ...info } = meta;
+      const { error } = await client.rpc('pss_add_song', { p_file: file, p_title: title || null, p_genre: genre || null, p_lyrics: lyrics || '', p_info: info });
+      if (error){ console.warn(error); return false; }
       return true;
     }
   };
