@@ -425,6 +425,33 @@ begin
 end $$;
 alter table public.pss_songs replica identity full;   -- so the teacher's other screens hear about deleted songs
 
+-- 9. Cloud save: each team's whole song as JSON, and its voice takes (raw 16-bit audio) in <class>/<team>/takes/.
+--    The school wipes iPads, so a team rejoining with its code gets its song back.
+update storage.buckets set allowed_mime_types = array['audio/mpeg', 'application/octet-stream'] where id = 'pss-songs';
+create table if not exists public.pss_saves (team_id uuid primary key references public.pss_teams (id) on delete cascade, project jsonb not null, user_id uuid, updated_at timestamptz not null default now());
+alter table public.pss_saves enable row level security;
+revoke all on public.pss_saves from anon, authenticated;
+grant select on public.pss_saves to authenticated;
+drop policy if exists "teachers and own team read saves" on public.pss_saves;
+create policy "teachers and own team read saves" on public.pss_saves for select to authenticated using (public.pss_is_teacher() or team_id = public.pss_my_team());
+create or replace function public.pss_save_project(p_project jsonb) returns timestamptz language plpgsql volatile security definer set search_path = '' as $$
+declare tid uuid := public.pss_my_team(); at timestamptz := now();
+begin
+  if tid is null then raise exception 'This iPad is not in a team.' using errcode = '42501'; end if;
+  if p_project is null or jsonb_typeof(p_project) <> 'object' or octet_length(p_project::text) > 1000000 then raise exception 'Song too big to save.' using errcode = '22001'; end if;
+  insert into public.pss_saves (team_id, project, user_id, updated_at) values (tid, p_project, auth.uid(), at)
+    on conflict (team_id) do update set project = excluded.project, user_id = excluded.user_id, updated_at = excluded.updated_at;
+  return at;
+end $$;
+create or replace function public.pss_load_project() returns jsonb language sql stable security definer set search_path = '' as $$
+  select jsonb_build_object('project', s.project, 'updated_at', s.updated_at) from public.pss_saves s where s.team_id = public.pss_my_team() $$;
+revoke execute on function public.pss_save_project(jsonb), public.pss_load_project() from public, anon;
+grant execute on function public.pss_save_project(jsonb), public.pss_load_project() to authenticated;
+drop policy if exists "pss song files: teams upload takes to own folder" on storage.objects;
+create policy "pss song files: teams upload takes to own folder" on storage.objects for insert to authenticated
+  with check (bucket_id = 'pss-songs' and (storage.foldername(name))[1] = public.pss_my_class()::text and (storage.foldername(name))[2] = public.pss_my_team()::text and (storage.foldername(name))[3] = 'takes' and lower(storage.extension(name)) = 'pcm');
+
+
 commit;
 
 -- What happened (shows in the results panel):

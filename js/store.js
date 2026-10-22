@@ -54,3 +54,9 @@ export async function loadTake(id){
   return { pcm, sampleRate: rec.sampleRate };
 }
 export async function deleteTake(id){ return tx('readwrite', s => s.delete(id)); }
+// The stored take as it is (16-bit audio), for the cloud backup.
+export async function getTakeRaw(id){ const rec = await tx('readonly', s => s.get(id)); return rec || null; }
+export async function putTakeRaw(id, sampleRate, blob){ return tx('readwrite', s => s.put({ sampleRate, data: blob }, id)); }
+export async function hasTake(id){ return !!(await tx('readonly', s => s.getKey(id))); }
+// The project as saved (no audio buffers), for the cloud backup.
+export const projectJSON = p => JSON.parse(JSON.stringify(p, (k, v) => (k === 'buffer' || k[0] === '_' ? undefined : v)));

@@ -59,6 +59,32 @@ export function create(cfg){
       online = !error || online;
       return !error;
     },
+    // Cloud backup of the whole song, so a wiped iPad loses nothing.
+    async saveProject(json){
+      await ready; if (!client || !team) return false;
+      const { error } = await client.rpc('pss_save_project', { p_project: json });
+      if (error) console.warn(error);
+      return !error;
+    },
+    async loadProject(){
+      await ready; if (!client || !team) return null;
+      const { data, error } = await client.rpc('pss_load_project');
+      return error ? null : data;
+    },
+    async uploadTake(takeId, sampleRate, blob){
+      await ready; if (!client || !team) return false;
+      const path = `${team.class_id}/${team.id}/takes/${String(takeId).replace(/[^\w-]/g, '_')}-${sampleRate}.pcm`;
+      const { error } = await client.storage.from('pss-songs').upload(path, blob, { contentType: 'application/octet-stream', upsert: false });
+      return !error || /exists|duplicate/i.test(error.message || '');
+    },
+    async downloadTake(takeId){
+      await ready; if (!client || !team) return null;
+      const folder = `${team.class_id}/${team.id}/takes`, base = String(takeId).replace(/[^\w-]/g, '_') + '-';
+      const { data: list } = await client.storage.from('pss-songs').list(folder, { limit: 1000, search: base });
+      const f = (list || []).find(x => x.name.startsWith(base) && x.name.endsWith('.pcm')); if (!f) return null;
+      const { data, error } = await client.storage.from('pss-songs').download(`${folder}/${f.name}`);
+      return error ? null : { blob: data, sampleRate: +f.name.slice(base.length, -4) };
+    },
     async upload(meta, mp3){
       await ready; if (!client || !team) return false;
       const file = `${team.class_id}/${team.id}/${Date.now()}-${Math.random().toString(36).slice(2, 8)}.mp3`;

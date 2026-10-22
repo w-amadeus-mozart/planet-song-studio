@@ -28,6 +28,13 @@ export async function leaveTeam(){ await connect(); return transport.leave(); }
 const mine = p => { const t = transport && transport.team(); return !!(t && p.teamId && p.teamId === t.id); };
 export const canSend = p => linkStatus() === 'online' && mine(p);
 
+// Cloud backup of this team's song. Returns true when saved.
+export async function cloudSave(project, json){ await connect(); if (!mine(project)) return false; return transport.saveProject(json); }
+// The team's song from the cloud: {project, updated_at} or null.
+export async function cloudLoad(){ await connect(); return transport.loadProject ? transport.loadProject() : null; }
+export async function cloudPutTake(project, id, sr, blob){ await connect(); if (!mine(project)) return false; return transport.uploadTake(id, sr, blob); }
+export async function cloudGetTake(id){ await connect(); return transport.downloadTake ? transport.downloadTake(id) : null; }
+
 // A small progress update for the teacher's live feed ("6M · Earth chose Rap").
 export async function announce(project, what){
   await connect();

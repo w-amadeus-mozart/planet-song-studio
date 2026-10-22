@@ -4,7 +4,7 @@ import { CLASSES, PLANETS, PMAP, ORDINAL, GENRES, GMAP, SPACE_PADS, SCALES, chor
 import * as E from './engine.js';
 import { loadRhymes, findRhymes, rhymeKey, lineSyllables } from './rhymes.js';
 import * as store from './store.js';
-import { announce, sendSong, connect, linkStatus, cloudOn, myTeam, joinTeam, canSend } from './link.js';
+import { announce, sendSong, connect, linkStatus, cloudOn, myTeam, joinTeam, canSend, cloudSave, cloudLoad, cloudPutTake, cloudGetTake } from './link.js';
 import { paintBackdrop } from './backdrop.js';
 
 /* ---------- state ---------- */
@@ -70,14 +70,51 @@ function newProject(cls, planet, team, members){
 function save(now){
   if (!P) return;
   clearTimeout(saveT);
-  const go = () => { const ok = store.saveProject(P); savedAt = ok ? new Date() : null; paintSaved(); };
+  const go = () => { const ok = store.saveProject(P); savedAt = ok ? new Date() : null; paintSaved(); cloudSoon(); };
   if (now) go(); else { saveT = setTimeout(go, 400); paintSaved(true); }
 }
 function paintSaved(pending){
   const el = $('#saved'); if (!el) return;
-  if (!store.storageOK){ el.className = 'saved-state warn'; el.textContent = 'Not saving on this iPad!'; return; }
-  el.className = 'saved-state';
-  el.textContent = pending ? 'Saving…' : savedAt ? 'Saved ✓' : 'Autosave on';
+  if (!store.storageOK && cloud !== 'ok'){ el.className = 'saved-state warn'; el.textContent = 'Not saving on this iPad!'; return; }
+  el.className = 'saved-state' + (cloud === 'failed' ? ' warn' : '');
+  el.textContent = pending ? 'Saving…' : cloud === 'ok' ? 'Saved in the cloud ✓' : cloud === 'saving' ? 'Saving to the cloud…' : cloud === 'failed' ? 'Saved on iPad · cloud save failed, retrying' : savedAt ? 'Saved ✓' : 'Autosave on';
+}
+
+/* ---------- cloud backup: the school wipes iPads, so the team's song also lives in the cloud ---------- */
+let cloud = null, cloudT = 0, cloudBusy = false, cloudAgain = false;   // cloud: null | 'saving' | 'ok' | 'failed'
+function cloudSoon(){ if (!P || !canSend(P)) return; clearTimeout(cloudT); cloudT = setTimeout(cloudNow, 2500); }
+async function cloudNow(){
+  if (!P || !canSend(P)) return;
+  if (cloudBusy){ cloudAgain = true; return; }
+  cloudBusy = true; cloud = 'saving'; paintSaved();
+  const p = P;
+  try {
+    p.cloudTakes ||= [];
+    for (const tr of p.tracks){
+      if (tr.type !== 'audio' || !tr.takeId || p.cloudTakes.includes(tr.takeId)) continue;
+      const raw = await store.getTakeRaw(tr.takeId); if (!raw) continue;
+      if (!await cloudPutTake(p, tr.takeId, raw.sampleRate, raw.data)) throw new Error('take upload failed');
+      p.cloudTakes.push(tr.takeId); store.saveProject(p);
+    }
+    if (!await cloudSave(p, store.projectJSON(p))) throw new Error('save failed');
+    cloud = 'ok';
+  } catch (e){ console.warn(e); cloud = 'failed'; clearTimeout(cloudT); cloudT = setTimeout(cloudNow, 15000); }
+  cloudBusy = false; paintSaved();
+  if (cloudAgain){ cloudAgain = false; cloudSoon(); }
+}
+// Before opening a team's song: if the cloud copy is newer (or this iPad has none), use it and fetch its voice takes.
+async function fromCloud(local){
+  const c = await cloudLoad().catch(() => null);
+  if (!c || !c.project || !c.project.tracks) return local;
+  const cloudP = c.project;
+  if (local && (local.updated || 0) >= (cloudP.updated || 0)) return local;
+  for (const tr of cloudP.tracks){
+    if (tr.type !== 'audio' || !tr.takeId || await store.hasTake(tr.takeId)) continue;
+    const t = await cloudGetTake(tr.takeId).catch(() => null);
+    if (t) await store.putTakeRaw(tr.takeId, t.sampleRate, t.blob);
+  }
+  toast('Your song came back from the cloud ☁️', 2500);
+  return cloudP;
 }
 addEventListener('pagehide', () => save(true));
 document.addEventListener('visibilitychange', () => { if (document.hidden) { save(true); if (rec) stopAll(); } });
@@ -593,7 +630,7 @@ async function openProject(p){
   save(true); render();
   loadRhymes(); if (P.genre) E.loadGenre(P.genre);
   loadTakes();
-  connect().then(paintLink);
+  connect().then(() => { paintLink(); cloudSoon(); });
 }
 function start(){
   const err = $('#joinErr');
@@ -623,13 +660,15 @@ async function joinCode(){
   try { history.replaceState(null, '', location.pathname); } catch (e){}
   startTeam(true);
 }
-// Opens the joined team's song on this iPad, or starts it.
-function startTeam(isNew){
+// Opens the joined team's song on this iPad (or the cloud copy, if newer), or starts it.
+async function startTeam(isNew){
   const t = joined; if (!t) return;
   E.audio();
+  const b = document.querySelector('[data-act=startTeam],[data-act=joinCode]'); if (b){ b.disabled = true; b.textContent = 'Opening your song…'; }
   const names = draft.members.map(m => m.trim()).filter(Boolean);
-  const hit = store.listProjects().map(x => store.loadProject(x.key)).find(p => p && p.teamId === t.id);
-  const p = hit || store.loadProject(store.projectKey(t.cls, t.planet, t.name)) || newProject(t.cls, t.planet, t.name, names.length ? names : (t.members || []));
+  const local = store.listProjects().map(x => store.loadProject(x.key)).find(p => p && p.teamId === t.id) || store.loadProject(store.projectKey(t.cls, t.planet, t.name));
+  const hit = await fromCloud(local);
+  const p = hit || newProject(t.cls, t.planet, t.name, names.length ? names : (t.members || []));
   Object.assign(p, { teamId: t.id, cls: t.cls, planet: t.planet, team: t.name });
   if (names.length) p.members = names;
   openProject(p);
