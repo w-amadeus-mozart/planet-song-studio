@@ -452,6 +452,23 @@ create policy "pss song files: teams upload takes to own folder" on storage.obje
   with check (bucket_id = 'pss-songs' and (storage.foldername(name))[1] = public.pss_my_class()::text and (storage.foldername(name))[2] = public.pss_my_team()::text and (storage.foldername(name))[3] = 'takes' and lower(storage.extension(name)) = 'pcm');
 
 
+-- 10. A team can send its lyrics on their own, before or without the MP3.
+alter table public.pss_teams add column if not exists lyrics text check (char_length(lyrics) <= 20000);
+alter table public.pss_teams add column if not exists lyrics_title text check (char_length(lyrics_title) <= 80);
+alter table public.pss_teams add column if not exists lyrics_at timestamptz;
+create or replace function public.pss_send_lyrics(p_lyrics text, p_title text default null, p_genre text default null) returns boolean
+language plpgsql volatile security definer set search_path = '' as $$
+declare t public.pss_teams;
+begin
+  select * into t from public.pss_teams where id = public.pss_my_team();
+  if not found then raise exception 'This iPad is not in a team.' using errcode = '42501'; end if;
+  update public.pss_teams set lyrics = left(coalesce(p_lyrics, ''), 20000), lyrics_title = left(p_title, 80), lyrics_at = now(), updated_at = now() where id = t.id;
+  insert into public.pss_events (class_id, team_id, user_id, what, info) values (t.class_id, t.id, auth.uid(), 'sent their lyrics', jsonb_build_object('genre', left(p_genre, 30)));
+  return true;
+end $$;
+revoke execute on function public.pss_send_lyrics(text, text, text) from public, anon;
+grant execute on function public.pss_send_lyrics(text, text, text) to authenticated;
+
 commit;
 
 -- What happened (shows in the results panel):

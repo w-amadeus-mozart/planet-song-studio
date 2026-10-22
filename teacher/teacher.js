@@ -288,7 +288,7 @@ function renderLive(){
           const dv = devices.get(t.id) || 0;
           return `<div class="team"><div class="trow"><b>${esc(t.team)}</b>${t.join_code ? `<button class="codechip" data-act="team" data-id="${t.id}" aria-label="Show code for ${esc(t.team)}">🔑 ${esc(t.join_code)}</button>` : ''}</div>
             ${t.join_code ? `<span class="small muted">📱 ${dv} iPad${dv === 1 ? '' : 's'}${t.joining_open ? '' : ' · joining closed'}${t.members && t.members.length ? ' · ' + esc(t.members.join(', ')) : ''}</span>` : ''}
-            <div class="chips">${g ? `<span class="tag genre">${g.name}</span>` : '<span class="tag">No genre yet</span>'}${i.lyricLines ? `<span class="tag">${i.lyricLines} lines</span>` : ''}${i.voices ? `<span class="tag">🎤 ${i.voices}</span>` : ''}${s ? '<span class="tag song">Song in ✓</span>' : ''}</div>
+            <div class="chips">${g ? `<span class="tag genre">${g.name}</span>` : '<span class="tag">No genre yet</span>'}${i.lyricLines ? `<span class="tag">${i.lyricLines} lines</span>` : ''}${i.voices ? `<span class="tag">🎤 ${i.voices}</span>` : ''}${t.lyrics_at ? '<span class="tag song">Lyrics ✓</span>' : ''}${s ? '<span class="tag song">Song in ✓</span>' : ''}</div>
             <span class="small muted">${esc(i.last || '')} · ${ago(t.updated_at)}</span></div>`; }).join('')
         : '<span class="empty">No team yet</span>'}
         ${auth === 'ok' ? `<button class="btn sm ghost addteam" data-act="addTeam" data-v="${p.id}">＋ Team</button>` : ''}
@@ -314,11 +314,6 @@ function renderSongs(){
       </div>`; }).join('') : `<div class="card muted">No songs from ${cls} yet. Teams press "Send to teacher" on their Send page.</div>`}</div>`;
 }
 
-function latestPerPlanet(c){
-  const out = [];
-  PLANETS.forEach(p => { const s = songs.map(named).filter(x => x.cls === c && x.planet === p.id).sort((a, b) => new Date(b.created_at) - new Date(a.created_at))[0]; if (s) out.push(s); });
-  return out;
-}
 function field(label, text, id){ return `<div class="field"><div class="lab"><span class="label">${label}</span><button class="btn sm" data-act="copy" data-for="${id}">Copy</button></div><textarea id="${id}" rows="${Math.min(12, Math.max(2, text.split('\n').length + 1))}" readonly>${esc(text)}</textarea></div>`; }
 // The studio sends "title / class line / genre line / blank" and then [Part] blocks; Suno wants just the tagged parts.
 function sunoLyrics(s){
@@ -330,31 +325,50 @@ function sunoLyrics(s){
     return `[${tag}]`;
   }).trim();
 }
+// Each planet in order from the Sun: its newest song (MP3 + lyrics), or, before any MP3, the lyrics a team sent.
+function planetLineup(c){
+  return PLANETS.map(p => {
+    const song = songs.map(named).filter(x => x.cls === c && x.planet === p.id).sort((a, b) => new Date(b.created_at) - new Date(a.created_at))[0];
+    const team = [...teams.values()].map(teamView).filter(t => t.cls === c && t.planet === p.id && t.lyrics).sort((a, b) => new Date(b.lyrics_at) - new Date(a.lyrics_at))[0];
+    const lyrics = (team && song && new Date(team.lyrics_at) > new Date(song.created_at) ? team.lyrics : song?.lyrics) || team?.lyrics || '';
+    if (!song && !lyrics) return null;
+    return { planet: p.id, song, team: song?.team || team?.team, title: song?.title || team?.lyrics_title || '', genre: song?.genre || team?.info?.genre || null, lyrics };
+  }).filter(Boolean);
+}
 function renderSuno(){
-  const list = latestPerPlanet(cls);
-  const genres = [...new Set(list.map(s => s.genre).filter(Boolean))];
-  const medleyLyrics = ['[Intro]\nFrom the Sun out to Neptune, here we go!',
-    ...list.map(s => { const ly = s.lyrics || ''; const m = ly.match(/\[Chorus[^\]]*\]\n([\s\S]*?)(\n\n|$)/i); const part = (m ? m[1] : ly.split('\n').slice(5, 9).join('\n')).trim(); return part ? `[${s.planet} – ${GMAP[s.genre]?.name || 'Pop'}]\n${part}` : ''; }).filter(Boolean),
+  const line = planetLineup(cls), withMp3 = line.filter(x => x.song);
+  const genres = [...new Set(line.map(x => x.genre).filter(Boolean))];
+  const gname = g => GMAP[g]?.name || 'Pop';
+  // Full lyrics, every planet in the same order as the medley MP3, each part labelled so Suno knows whose it is.
+  const fullLyrics = line.map(x => `[${x.planet} – ${gname(x.genre)}${x.song ? '' : ' (no MP3 yet)'}]\n` + (sunoLyrics({ lyrics: x.lyrics }) || '(no lyrics sent)')).join('\n\n');
+  const shortLyrics = ['[Intro]\nFrom the Sun out to Neptune, here we go!',
+    ...line.map(x => { const ly = x.lyrics || ''; const m = ly.match(/\[Chorus[^\]]*\]\n([\s\S]*?)(\n\n|$)/i); const part = (m ? m[1] : ly.split('\n').slice(5, 9).join('\n')).trim(); return part ? `[${x.planet} – ${gname(x.genre)}]\n${part}` : ''; }).filter(Boolean),
     `[Outro]\nEight planets spinning, one solar system! ${cls}!`].join('\n\n');
-  const medleyStyle = `genre-shifting kids medley, a new style for each planet (${genres.map(g => GMAP[g]?.name.toLowerCase()).join(', ') || 'pop'}), kids choir and rap, space synths, smooth transitions, polished mix`;
+  const order = withMp3.map((x, i) => `${i + 1}. ${x.planet} – ${gname(x.genre)} (${x.team})`).join('\n');
+  const medleyStyle = `genre-shifting kids medley, a new style for each planet in this order: ${line.map(x => `${x.planet} ${gname(x.genre).toLowerCase()}`).join(', ') || 'pop'}; kids choir and rap, space synths, smooth transitions, polished mix`;
+  const missing = PLANETS.filter(p => !line.some(x => x.planet === p.id)).map(p => p.id);
   return `<div class="suno">
     <div class="card">
       <h2 style="font-size:26px">${cls} as one Suno project</h2>
-      <p class="muted" style="margin:6px 0 12px">1. Make the class medley MP3: every planet's song in order from the Sun, joined into one file. 2. In Suno, upload it (Create › Upload audio) and use Cover or Remix with the style below, or paste the lyrics into Custom mode.</p>
-      <div style="display:flex;gap:10px;flex-wrap:wrap;align-items:center"><button class="btn primary" data-act="medley" ${list.length ? '' : 'disabled'}>🎛️ Make ${cls} medley MP3 (${list.length} planet${list.length === 1 ? '' : 's'})</button>
+      <p class="muted" style="margin:6px 0 12px">1. Make the class medley MP3: every planet's song joined in order from the Sun. 2. In Suno: Create › Upload audio (the medley), then Cover / Remix. 3. Paste the title, style and the full lyrics below. The lyrics follow the same planet order as the MP3, each part labelled with its planet and genre.</p>
+      ${missing.length ? `<p class="small" style="margin:0 0 10px">Not in yet: ${missing.join(', ')}</p>` : ''}
+      <div style="display:flex;gap:10px;flex-wrap:wrap;align-items:center"><button class="btn primary" data-act="medley" ${withMp3.length ? '' : 'disabled'}>🎛️ Make ${cls} medley MP3 (${withMp3.length} planet${withMp3.length === 1 ? '' : 's'})</button>
         ${medley && medley.cls === cls ? `<button class="btn" data-act="shareMedley">Save / share medley</button>` : ''}</div>
       <div class="progress" id="medProg" hidden style="margin-top:10px"><i></i></div>
       ${medley && medley.cls === cls ? `<audio controls src="${medley.url}" style="width:100%;margin-top:10px"></audio>` : ''}
-      ${field('Title', `${cls} Solar System Medley`, 'mt')}${field('Style of music', medleyStyle, 'ms')}${field('Lyrics', medleyLyrics, 'ml')}
+      ${withMp3.length ? field('Order in the medley MP3', order, 'mo') : ''}
+      ${field('Title', `${cls} Solar System Medley`, 'mt')}${field('Style of music', medleyStyle, 'ms')}
+      ${field(`Lyrics: full, in planet order (${fullLyrics.length} characters${fullLyrics.length > 5000 ? ', more than Suno takes: use the short version' : ''})`, fullLyrics || '(no lyrics yet)', 'ml')}
+      ${field('Lyrics: short version (one chorus per planet)', shortLyrics, 'mls')}
     </div>
-    ${list.map((s, i) => `<div class="card"><div style="display:flex;gap:10px;align-items:center">${orb(PMAP[s.planet], 36)}<h3 style="font-size:21px">${esc(s.planet)} · ${esc(s.team)}</h3></div>
-      ${field('Title', s.title || `The ${s.planet} Song`, 't' + i)}${field('Style of music', `${SUNO_STYLE[s.genre] || 'catchy kids song'}, about the planet ${s.planet}, clear kid-friendly vocals`, 's' + i)}${field('Lyrics', sunoLyrics(s) || '(this team sent no lyrics)', 'l' + i)}</div>`).join('')}
+    ${line.map((x, i) => `<div class="card"><div style="display:flex;gap:10px;align-items:center">${orb(PMAP[x.planet], 36)}<h3 style="font-size:21px">${esc(x.planet)} · ${esc(x.team || '')}</h3><span class="tag ${x.song ? 'song' : ''}">${x.song ? 'MP3 + lyrics' : 'Lyrics only'}</span></div>
+      ${field('Title', x.title || `The ${x.planet} Song`, 't' + i)}${field('Style of music', `${SUNO_STYLE[x.genre] || 'catchy kids song'}, about the planet ${x.planet}, clear kid-friendly vocals`, 's' + i)}${field('Lyrics', sunoLyrics({ lyrics: x.lyrics }) || '(this team sent no lyrics)', 'l' + i)}</div>`).join('')}
   </div>`;
 }
 
 /* ---------- medley ---------- */
 async function makeMedley(){
-  const list = latestPerPlanet(cls), prog = document.getElementById('medProg'), bar = prog.querySelector('i');
+  const list = planetLineup(cls).filter(x => x.song).map(x => x.song), prog = document.getElementById('medProg'), bar = prog.querySelector('i');
   prog.hidden = false; bar.style.width = '3%';
   try {
     const AC = window.AudioContext || window.webkitAudioContext, ac = new AC();

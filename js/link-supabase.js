@@ -85,6 +85,12 @@ export function create(cfg){
       const { data, error } = await client.storage.from('pss-songs').download(`${folder}/${f.name}`);
       return error ? null : { blob: data, sampleRate: +f.name.slice(base.length, -4) };
     },
+    async sendLyrics(text, title, genre){
+      await ready; if (!client || !team) return false;
+      const { error } = await client.rpc('pss_send_lyrics', { p_lyrics: text, p_title: title || null, p_genre: genre || null });
+      if (error) console.warn(error);
+      return !error;
+    },
     async upload(meta, mp3){
       await ready; if (!client || !team) return false;
       const file = `${team.class_id}/${team.id}/${Date.now()}-${Math.random().toString(36).slice(2, 8)}.mp3`;

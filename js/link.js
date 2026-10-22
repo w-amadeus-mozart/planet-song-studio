@@ -41,6 +41,12 @@ export async function announce(project, what){
   if (!mine(project)) return false;
   return transport.send({ what, ...summary(project) });
 }
+// The lyrics on their own, so the teacher has them even before the MP3.
+export async function sendLyrics(project, text){
+  await connect();
+  if (!mine(project) || !transport.sendLyrics) return false;
+  return transport.sendLyrics(text, project.title || '', project.genre || '');
+}
 // The finished song: MP3 plus the lyrics and details.
 export async function sendSong(project, mp3, lyricsText){
   await connect();

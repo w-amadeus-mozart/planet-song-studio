@@ -4,7 +4,7 @@ import { CLASSES, PLANETS, PMAP, ORDINAL, GENRES, GMAP, SPACE_PADS, SCALES, chor
 import * as E from './engine.js';
 import { loadRhymes, findRhymes, rhymeKey, lineSyllables } from './rhymes.js';
 import * as store from './store.js';
-import { announce, sendSong, connect, linkStatus, cloudOn, myTeam, joinTeam, canSend, cloudSave, cloudLoad, cloudPutTake, cloudGetTake } from './link.js';
+import { announce, sendSong, connect, linkStatus, cloudOn, myTeam, joinTeam, canSend, cloudSave, cloudLoad, cloudPutTake, cloudGetTake, sendLyrics } from './link.js';
 import { paintBackdrop } from './backdrop.js';
 
 /* ---------- state ---------- */
@@ -130,6 +130,13 @@ const track = id => P.tracks.find(t => t.id === id);
 const chorusText = () => (P.sections.find(s => s.kind === 'chorus') || { text: '' }).text;
 const secText = s => (s.kind === 'repeat' ? chorusText() : s.text);
 
+const hasLyrics = () => P.sections.some(s => s.kind !== 'repeat' && s.text.trim());
+async function doSendLyrics(){
+  const b = document.querySelector('[data-act=sendLyrics]'); b.disabled = true; b.textContent = 'Sending…';
+  const ok = await sendLyrics(P, lyricsAsText()).catch(() => false);
+  b.textContent = ok ? '✓ Lyrics sent!' : '📝 Send our lyrics'; b.disabled = false;
+  toast(ok ? 'Your lyrics are with your teacher!' : 'Could not send. Check the wifi and try again.');
+}
 function lyricsAsText(){
   const lines = [P.title || `Our ${P.planet} song`, `${P.cls} · ${P.planet} · ${P.team}${P.members.length ? ' (' + P.members.join(', ') + ')' : ''}`, `Genre: ${P.genre ? GMAP[P.genre].name : '—'} · ${P.bpm} BPM`, ''];
   P.sections.forEach(s => { const t = secText(s).trim(); if (t) lines.push('[' + s.label + ']', t, ''); });
@@ -593,7 +600,9 @@ function renderSend(){
       <h3 style="font-size:22px">Send to your teacher</h3>
       <p class="small muted" style="margin:0">${online ? "Your teacher's iPad is connected. Sending gives them your MP3 and lyrics." : needCode ? 'To send, this iPad needs your team code again (ask your teacher). You can still save the MP3 on this iPad.' : "Your teacher's iPad isn't connected right now. You can still save the MP3 on this iPad and send it another way."}</p>
       ${needCode ? `<div class="row"><input type="text" id="code2" class="code-input sm" placeholder="Team code" maxlength="7" autocomplete="off" autocapitalize="characters" spellcheck="false" aria-label="Team code"><button class="btn" data-act="rejoin">Join</button></div>` : ''}
-      <button class="btn rec" data-act="send" ${mp3 && online ? '' : 'disabled'} style="min-height:56px">📤 Send to teacher</button>
+      <button class="btn" data-act="sendLyrics" ${online && hasLyrics() ? '' : 'disabled'} style="min-height:56px">📝 Send our lyrics</button>
+      <button class="btn rec" data-act="send" ${mp3 && online ? '' : 'disabled'} style="min-height:56px">📤 Send song + lyrics</button>
+      <p class="small muted" style="margin:0">Send your lyrics as soon as they're ready. Sending the song sends the lyrics again too.</p>
       <a class="btn" id="saveMp3" ${mp3 ? `href="${mp3.url}" download="${esc(fileName())}"` : 'aria-disabled="true" style="opacity:.4;pointer-events:none"'}>💾 Save MP3 on this iPad</a>
       <details><summary class="small" style="min-height:44px;display:flex;align-items:center;font-weight:800">Our lyrics as text</summary><textarea readonly rows="10" style="font-size:14px">${esc(lyricsAsText())}</textarea></details>
     </div>
@@ -617,7 +626,8 @@ async function makeMp3(){
 async function send(){
   const b = document.querySelector('[data-act=send]'); b.disabled = true; b.textContent = 'Sending…';
   const ok = await sendSong(P, mp3.blob, lyricsAsText()).catch(() => false);
-  b.textContent = ok ? '✓ Sent!' : '📤 Send to teacher'; b.disabled = !!ok;
+  if (ok) sendLyrics(P, lyricsAsText()).catch(() => {});
+  b.textContent = ok ? '✓ Sent!' : '📤 Send song + lyrics'; b.disabled = !!ok;
   toast(ok ? 'Sent to your teacher!' : 'Could not send. Check the wifi and try again.');
 }
 
@@ -748,6 +758,7 @@ app.addEventListener('click', e => {
     case 'motion': toggleMotion(); break;
     case 'makeMp3': makeMp3(); break;
     case 'send': send(); break;
+    case 'sendLyrics': doSendLyrics(); break;
   }
 });
 app.addEventListener('pointerdown', e => {
