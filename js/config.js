@@ -4,8 +4,8 @@
 // Never put the service_role key here or anywhere in the apps.
 // mode 'none': songs stay on each iPad and can be saved as MP3.
 export const CONFIG = {
-  mode: 'none',
-  url: '',
-  key: '',
+  mode: 'supabase',
+  url: 'https://ssmecsrzvigrbkkmwyoq.supabase.co',
+  key: 'eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6InNzbWVjc3J6dmlncmJra213eW9xIiwicm9sZSI6ImFub24iLCJpYXQiOjE3OTI2NDk1MjAsImV4cCI6MjEwODIyNTUyMH0.zhuR05SFoTk3CVyy0imI3qQ7STaNRfLsnqJHPM7UBis',
   studioUrl: 'https://w-amadeus-mozart.github.io/planet-song-studio/'
 };
