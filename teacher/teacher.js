@@ -310,7 +310,7 @@ function renderSongs(){
           <div class="small muted">${esc(s.team)}${s.genre ? ' · ' + esc(GMAP[s.genre]?.name || s.genre) : ''} · ${ago(s.created_at)}${s.local ? ' · from Files' : ''}</div>
           <audio controls preload="none" src="${esc(s.url)}"></audio>
           ${s.lyrics ? `<details><summary>Lyrics</summary><div class="lyrics">${esc(s.lyrics)}</div></details>` : ''}</div>
-        <div class="acts"><button class="btn sm" data-act="share" data-id="${esc(s.id)}">Save / share</button><button class="btn sm ghost" data-act="del" data-id="${esc(s.id)}">Remove</button></div>
+        <div class="acts"><button class="btn sm" data-act="share" data-id="${esc(s.id)}">Save / share</button>${s.team_id ? `<button class="btn sm" data-act="voice" data-id="${esc(s.team_id)}">🎤 Voice only</button>` : ''}<button class="btn sm ghost" data-act="del" data-id="${esc(s.id)}">Remove</button></div>
       </div>`; }).join('') : `<div class="card muted">No songs from ${cls} yet. Teams press "Send to teacher" on their Send page.</div>`}</div>`;
 }
 
@@ -393,6 +393,49 @@ async function makeMedley(){
     ac.close(); render(); toast('Medley ready');
   } catch (e){ console.error(e); toast('Could not make the medley'); prog.hidden = true; }
 }
+/* ---------- voice only: a team's recorded voices without the beat, e.g. to upload to Suno ---------- */
+async function voiceOnly(teamId, btn){
+  const t = teams.get(teamId); if (!t || !sb) return;
+  const label = btn && btn.textContent; if (btn){ btn.disabled = true; btn.textContent = 'Getting voices…'; }
+  try {
+    const { data: save } = await sb.from('pss_saves').select('project').eq('team_id', teamId).maybeSingle();
+    const p = save && save.project, voices = p ? (p.tracks || []).filter(tr => tr.type === 'audio' && tr.takeId && !tr.mute) : [];
+    if (!voices.length){ toast('No saved voice recordings for this team'); return; }
+    const folder = `${t.class_id}/${t.id}/takes`;
+    const { data: files } = await sb.storage.from('pss-songs').list(folder, { limit: 1000 });
+    const sr = 44100, songSecs = (p.bars || 8) * 16 * (60 / (p.bpm || 100) / 4) + 2.5;
+    const takes = [];
+    for (const tr of voices){
+      const base = String(tr.takeId).replace(/[^\w-]/g, '_') + '-', f = (files || []).find(x => x.name.startsWith(base) && x.name.endsWith('.pcm'));
+      if (!f) continue;
+      const { data } = await sb.storage.from('pss-songs').download(`${folder}/${f.name}`); if (!data) continue;
+      const i16 = new Int16Array(await data.arrayBuffer()), rate = +f.name.slice(base.length, -4) || sr, pcm = new Float32Array(i16.length);
+      for (let i = 0; i < i16.length; i++) pcm[i] = i16[i] / 32767;
+      takes.push({ tr, pcm, rate });
+    }
+    if (!takes.length){ toast('The voice recordings are not in the cloud'); return; }
+    // Same placement and levels as the team's song, so the voices line up with their beat.
+    const len = Math.ceil(Math.max(songSecs, ...takes.map(x => .05 + x.pcm.length / x.rate - Math.min(0, x.tr.offset || 0))) * sr);
+    const oc = new OfflineAudioContext(1, len, sr);
+    takes.forEach(({ tr, pcm, rate }) => {
+      const b = oc.createBuffer(1, pcm.length, rate); b.getChannelData(0).set(pcm);
+      const s = oc.createBufferSource(), g = oc.createGain(); s.buffer = b; g.gain.value = tr.vol ?? .8; s.connect(g).connect(oc.destination);
+      const o = tr.offset || 0; if (o >= 0) s.start(.05, o); else s.start(.05 - o);
+    });
+    const out = (await oc.startRendering()).getChannelData(0);
+    let peak = 0; for (let i = 0; i < out.length; i++) peak = Math.max(peak, Math.abs(out[i]));
+    const k = peak > 0 ? .9 / peak : 1;   // as loud as it can go without clipping
+    saveBlob(wav(out, sr, k), `${fileBase(teamView(t))} - voice only.wav`);
+  } catch (e){ console.error(e); toast('Could not get the voices'); }
+  finally { if (btn){ btn.disabled = false; btn.textContent = label; } }
+}
+function wav(pcm, sr, gain){
+  const b = new DataView(new ArrayBuffer(44 + pcm.length * 2)), str = (o, s) => [...s].forEach((c, i) => b.setUint8(o + i, c.charCodeAt(0)));
+  str(0, 'RIFF'); b.setUint32(4, 36 + pcm.length * 2, true); str(8, 'WAVEfmt '); b.setUint32(16, 16, true); b.setUint16(20, 1, true); b.setUint16(22, 1, true);
+  b.setUint32(24, sr, true); b.setUint32(28, sr * 2, true); b.setUint16(32, 2, true); b.setUint16(34, 16, true); str(36, 'data'); b.setUint32(40, pcm.length * 2, true);
+  for (let i = 0; i < pcm.length; i++){ const v = Math.max(-1, Math.min(1, pcm[i] * gain)); b.setInt16(44 + i * 2, v * 32767, true); }
+  return new Blob([b], { type: 'audio/wav' });
+}
 // Saving a file: a click on a download link. In the iPad app that opens the share sheet (Save to Files, AirDrop).
 async function saveBlob(blobOrUrl, name){
   const blob = typeof blobOrUrl === 'string' ? await fetch(blobOrUrl).then(r => r.blob()) : blobOrUrl;
@@ -434,7 +477,7 @@ function renderSheet(){
       <p class="small muted" style="margin:0;text-align:center">${t.joining_open ? 'The team types this code in the studio, or scans the team QR.' : 'Joining is closed: this code does not work right now. iPads already in the team carry on.'}</p>
       <div class="acts" style="justify-content:center"><button class="btn primary" data-act="teamQR" data-id="${t.id}">Show team QR</button>
         <button class="btn" data-act="joining" data-id="${t.id}">${t.joining_open ? 'Close joining' : 'Open joining'}</button>
-        <button class="btn" data-act="newCode" data-id="${t.id}">New code</button></div>
+        <button class="btn" data-act="newCode" data-id="${t.id}">New code</button><button class="btn" data-act="voice" data-id="${t.id}">🎤 Voice only</button></div>
       <p class="small muted" style="margin:0">New code: the old code stops working and the team's iPads are signed out of the team until they type the new one. Their work on the iPad is kept.</p>
       <div class="acts"><button class="btn ghost" data-act="delTeam" data-id="${t.id}">Delete team and its songs</button><button class="btn" data-act="closeSheet">Done</button></div></div>`;
   } else if (sheet.kind === 'classes'){
@@ -479,6 +522,7 @@ app.addEventListener('click', async e => {
       await deleteSong(s); render();
     } break;
     case 'medley': makeMedley(); break;
+    case 'voice': voiceOnly(b.dataset.id, b); break;
     case 'shareMedley': if (medley) saveBlob(medley.blob, `${cls} - Solar System Medley.mp3`); break;
   }
 });
